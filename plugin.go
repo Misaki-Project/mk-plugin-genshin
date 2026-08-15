@@ -28,6 +28,9 @@ var Plugin = plugin.Definition{
 	Migrations: migrations,
 	Routes:     routes,
 	Jobs:       jobs,
+	// 同じプラグインを入れた mk-go 同士で、リモート利用者の戦績を取り寄せる。
+	// ActivityPub には出ない経路 (mk-go #2537)。
+	Peered: true,
 }
 
 // settings mirrors the `plugins.genshin` section of the instance config.
@@ -59,6 +62,24 @@ func loadSettings(ctx plugin.Context) (settings, error) {
 }
 
 var migrations = []plugin.Migration{
+	{Version: 5, SQL: `
+		CREATE TABLE remote_pending (
+			id         text PRIMARY KEY,
+			host       text NOT NULL,
+			username   text NOT NULL,
+			created_at timestamptz NOT NULL DEFAULT now()
+		)
+	`},
+	{Version: 4, SQL: `
+		CREATE TABLE remote_snapshots (
+			host       text NOT NULL,
+			username   text NOT NULL,
+			payload    jsonb NOT NULL,
+			fetched_at timestamptz NOT NULL DEFAULT now(),
+			expires_at timestamptz NOT NULL,
+			PRIMARY KEY (host, username)
+		)
+	`},
 	{Version: 3, SQL: `
 		ALTER TABLE snapshots
 			ADD COLUMN tower_star   int   NOT NULL DEFAULT 0,
@@ -108,6 +129,9 @@ func routes(ctx plugin.Context, r plugin.Router) error {
 	}
 	db := ctx.Storage().DB()
 	client := newEnkaClient(set)
+
+	// 同じプラグインを入れた mk-go 同士のやりとり (mk-go #2537)。
+	registerPeer(ctx, db, client)
 
 	// frontend から呼ぶものは POST にする。misskeyApi (= host.api) が POST
 	// 固定で、Misskey 本体の API も POST 基本なのでそれに倣う。
@@ -185,80 +209,18 @@ func routes(ctx plugin.Context, r plugin.Router) error {
 			return nil, plugin.Errorf(http.StatusBadRequest, "userId が必要です")
 		}
 
-		var (
-			uid, nickname, signature, region, profileIcon string
-			level, worldLevel, nameCardID                 int
-			achievements, towerFloor, towerLevel          int
-			towerStar, theaterAct, theaterMode            int
-			theaterStar, fetterCount                      int
-			showcaseRaw, charactersRaw                    []byte
-			fetchedAt                                     time.Time
-		)
-		err := db.QueryRowContext(req.Context(), `
-			SELECT a.uid, s.nickname, s.level, s.world_level, s.signature, s.fetched_at,
-			       s.name_card_id, s.region, s.achievements, s.tower_floor, s.tower_level,
-			       s.profile_icon, s.showcase,
-			       s.tower_star, s.theater_act, s.theater_mode, s.theater_star,
-			       s.fetter_count, s.characters
-			FROM accounts a JOIN snapshots s ON s.uid = a.uid
-			WHERE a.user_id = $1
-		`, body.UserID).Scan(&uid, &nickname, &level, &worldLevel, &signature, &fetchedAt,
-			&nameCardID, &region, &achievements, &towerFloor, &towerLevel, &profileIcon, &showcaseRaw,
-			&towerStar, &theaterAct, &theaterMode, &theaterStar, &fetterCount, &charactersRaw)
-		if errors.Is(err, sql.ErrNoRows) {
-			// 未登録は「無い」であってエラーではない。プロフィール表示側は
-			// これを見て何も描かない。
-			return map[string]any{"linked": false}, nil
-		}
+		// まず自分のところの利用者として引く。
+		profile, err := buildProfile(req.Context(), db, client, body.UserID)
 		if err != nil {
 			return nil, err
 		}
-
-		var showcase []showcaseEntry
-		if len(showcaseRaw) > 0 {
-			_ = json.Unmarshal(showcaseRaw, &showcase)
-		}
-		// 壊れた JSON でカード全体を落とさない。詳細が出ないだけで済ませる。
-		characters := []character{}
-		if len(charactersRaw) > 0 {
-			_ = json.Unmarshal(charactersRaw, &characters)
+		if profile != nil {
+			return profile, nil
 		}
 
-		// アイコンは**自分のプロキシ経由の URL**として返す。CSP が
-		// `img-src 'self'` なので、取得元の URL を渡しても表示できない。
-		profileIconURL := ""
-		if id, convErr := strconv.Atoi(profileIcon); convErr == nil && id != 0 {
-			if info, ok := client.chars.Lookup(req.Context(), id); ok {
-				profileIconURL = assetURL(info.IconName())
-			}
-		}
-		cards := make([]map[string]any, 0, len(showcase))
-		for _, e := range showcase {
-			cards = append(cards, map[string]any{
-				"level": e.Level, "element": e.Element, "icon": assetURL(e.Icon),
-			})
-		}
-
-		return map[string]any{
-			"linked":        true,
-			"uid":           uid,
-			"nickname":      nickname,
-			"adventureRank": level,
-			"worldLevel":    worldLevel,
-			"signature":     signature,
-			"region":        region,
-			"achievements":  achievements,
-			"spiral":        spiralLabel(towerFloor, towerLevel),
-			"spiralStars":   towerStar,
-			"theater":       theaterLabel(theaterAct, theaterMode),
-			"theaterStars":  theaterStar,
-			"fetterCount":   fetterCount,
-			"characters":    characters,
-			"profileIcon":   profileIconURL,
-			"nameCard":      nameCardURL(req.Context(), client.namecards, nameCardID),
-			"showcase":      cards,
-			"fetchedAt":     fetchedAt,
-		}, nil
+		// 見つからなければリモート利用者かもしれない。相手のインスタンスに
+		// 取り寄せを頼む (mk-go #2537 の peer channel、AP には出ない)。
+		return remoteLookup(req.Context(), ctx, db, body.UserID)
 	})
 
 	// 画像プロキシ。本体の CSP は `img-src 'self'` なので、外部の画像を

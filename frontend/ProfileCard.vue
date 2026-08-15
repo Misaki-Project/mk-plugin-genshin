@@ -148,9 +148,9 @@ function fmt(st: Stat): string {
 onMounted(async () => {
 	const user = props.ctx.user;
 	if (user == null) return;
-	// リモートユーザーには出さない。このインスタンスに登録された UID しか
-	// 持っていないので、他所のユーザーでは必ず未登録になる。
-	if (user.host != null) return;
+	// リモート利用者も引く。相手が同じプラグインを入れた mk-go なら、
+	// バックエンドが取り寄せて返す (初回は間に合わないので出ない)。
+	// 相手が Misskey TS などなら、いつまでも linked:false のままになる。
 
 	try {
 		const res = await api<ProfileResponse>('profile', { userId: user.id });
