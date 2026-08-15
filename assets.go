@@ -26,17 +26,38 @@ import (
 // assetBase is where Enka serves UI images.
 const assetBase = "https://enka.network/ui/"
 
-// Enka publishes these id -> icon-name maps as static files.
+/*
+ * Enka が公開しているマスターデータ。
+ *
+ * # store/ 直下 (旧形式) を使わないこと
+ *
+ * 同じ内容が `store/characters.json` と `store/gi/avatars.json` の 2 系統で
+ * 置かれているが、**旧形式は更新が止まっている**。
+ *
+ *	store/characters.json   2025-12-07 (6.2) で停止
+ *	store/loc.json          2026-01-01 で停止
+ *	store/namecards.json    2025-12-07 で停止
+ *	store/gi/*.json         更新が続いている
+ *
+ * 旧形式のままだと 6.2 以降に追加されたキャラ (コロンビーナ、サンドローネ、
+ * アリョーシャなど 11 人) が丸ごと欠け、名前もアイコンも出せない。ドールに
+ * 至ってはエントリが空オブジェクトになっている (mk-plugin-genshin #1)。
+ *
+ * 新形式は**アイコンをパスで持つ** (`/ui/UI_AvatarIcon_Side_Ambor.png`)。
+ * 拡張子まで含まれるので、名刺の `.jpg` も正しく扱える。
+ */
 const (
-	charactersURL = "https://raw.githubusercontent.com/EnkaNetwork/API-docs/master/store/characters.json"
-	namecardsURL  = "https://raw.githubusercontent.com/EnkaNetwork/API-docs/master/store/namecards.json"
-	// locURL maps text hashes to display names (キャラ名・武器名・聖遺物セット名)。
-	locURL = "https://raw.githubusercontent.com/EnkaNetwork/API-docs/master/store/loc.json"
-	// uiLocURL maps UI keys like `FIGHT_PROP_CRITICAL` to labels.
-	// **ステータス名を自前で持たない**ためにこれを使う (取り違えが起きない)。
-	uiLocURL = "https://raw.githubusercontent.com/EnkaNetwork/API-docs/master/store/gi/locs.json"
-	// relicsURL carries the artifact set masters. 新しいセットは loc.json 側の
-	// 更新が追いつかず setNameTextMapHash を引けないので、こちらから補う。
+	avatarsURL   = "https://raw.githubusercontent.com/EnkaNetwork/API-docs/master/store/gi/avatars.json"
+	namecardsURL = "https://raw.githubusercontent.com/EnkaNetwork/API-docs/master/store/gi/namecards.json"
+	// locsURL maps text hashes to display names, and UI keys like
+	// `FIGHT_PROP_CRITICAL` to labels.
+	//
+	// **旧形式では取得元が 3 つに割れていた** (キャラ名は loc.json、武器名と
+	// 一部のセット名は gi/locs.json、新しい聖遺物セットは gi/relics.json 経由)。
+	// 新形式はこれ 1 つで全部引けるので、その分岐は要らなくなった。
+	locsURL = "https://raw.githubusercontent.com/EnkaNetwork/API-docs/master/store/gi/locs.json"
+	// relicsURL carries the artifact set masters. 応答の setNameTextMapHash で
+	// 引けないセットを、アイコン名から set id を取って補うのに使う。
 	relicsURL = "https://raw.githubusercontent.com/EnkaNetwork/API-docs/master/store/gi/relics.json"
 )
 
@@ -53,9 +74,15 @@ const maxLocBytes = 8 << 20
 //
 // **リクエストの文字列がそのまま取得先 URL になる。** `../` や別ホストへ
 // 逃げられないよう、Enka の命名規則に合う文字だけを通す。
+//
+// 新形式は拡張子まで持つ (`UI_NameCardPic_0_P.jpg`) のでドットを許すが、
+// **`..` と先頭のドットは弾く** — そこを通すと親ディレクトリへ辿れる。
 var assetNamePattern = func() func(string) bool {
 	return func(s string) bool {
 		if s == "" || len(s) > 128 {
+			return false
+		}
+		if strings.HasPrefix(s, ".") || strings.Contains(s, "..") || strings.Contains(s, "/") {
 			return false
 		}
 		for _, r := range s {
@@ -63,7 +90,7 @@ var assetNamePattern = func() func(string) bool {
 			case r >= 'a' && r <= 'z':
 			case r >= 'A' && r <= 'Z':
 			case r >= '0' && r <= '9':
-			case r == '_' || r == '-':
+			case r == '_' || r == '-' || r == '.':
 			default:
 				return false
 			}
@@ -71,6 +98,12 @@ var assetNamePattern = func() func(string) bool {
 		return true
 	}
 }()
+
+// assetPathPrefix is where Enka's master data points at UI images.
+//
+// 新形式は `/ui/UI_AvatarIcon_Side_Ambor.png` のようなパスを持つ。中継の鍵に
+// するのはこの前置きを剥がした部分。
+const assetPathPrefix = "/ui/"
 
 // characterInfo is the subset of Enka's masters we need.
 //
@@ -98,11 +131,20 @@ type characterInfo struct {
 //
 // Enka は `UI_AvatarIcon_Side_Ambor` (横顔) しか持たないが、正面の
 // `UI_AvatarIcon_Ambor` も同じ命名規則で配信されている。
+//
+// **新形式はパスで来る** (`/ui/UI_AvatarIcon_Side_Ambor.png`) ので前置きを
+// 剥がす。拡張子はそのまま残す — 名刺は `.jpg` で、`.png` 決め打ちにすると
+// 取り違える。
 func (c characterInfo) IconName() string {
-	if c.SideIconName == "" {
-		return c.Icon
+	name := c.SideIconName
+	if name == "" {
+		name = c.Icon
 	}
-	return strings.Replace(c.SideIconName, "_Side_", "_", 1)
+	name = strings.TrimPrefix(name, assetPathPrefix)
+	if name == "" {
+		return ""
+	}
+	return strings.Replace(name, "_Side_", "_", 1)
 }
 
 // characterStore caches the avatarId -> characterInfo mapping.
@@ -117,7 +159,7 @@ type characterStore struct {
 }
 
 func newCharacterStore(client *http.Client) *characterStore {
-	return &characterStore{client: client, endpoint: charactersURL}
+	return &characterStore{client: client, endpoint: avatarsURL}
 }
 
 // newNamecardStore reads the namecard id -> picture mapping.
@@ -127,15 +169,21 @@ func newNamecardStore(client *http.Client) *characterStore {
 
 // Lookup returns the character info for an avatarId.
 //
+// skillDepotID が 0 でなければ `<avatarId>-<skillDepotId>` を先に試す。
+// **旅人とドールは元素ごとに別のエントリを持つ** ので、これを見ないと元素も
+// 天賦も引けない (旧形式では `10000117` が空オブジェクトだった)。
+//
 // **nil レシーバでも落とさない。** master を配線し忘れても、名前やアイコンが
 // 出ないだけでカードは成立させる。
-func (s *characterStore) Lookup(ctx context.Context, avatarID int) (characterInfo, bool) {
+func (s *characterStore) Lookup(ctx context.Context, avatarID, skillDepotID int) (characterInfo, bool) {
 	if s == nil {
 		return characterInfo{}, false
 	}
+	keys := lookupKeys(avatarID, skillDepotID)
+
 	s.mu.RLock()
 	fresh := time.Since(s.fetched) < 24*time.Hour && s.byID != nil
-	info, ok := s.byID[strconv.Itoa(avatarID)]
+	info, ok := pick(s.byID, keys)
 	s.mu.RUnlock()
 
 	if fresh {
@@ -146,14 +194,34 @@ func (s *characterStore) Lookup(ctx context.Context, avatarID int) (characterInf
 		// 出ないだけでカード自体は表示できる方がよい。
 		s.mu.RLock()
 		defer s.mu.RUnlock()
-		info, ok := s.byID[strconv.Itoa(avatarID)]
-		return info, ok
+		return pick(s.byID, keys)
 	}
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	info, ok = s.byID[strconv.Itoa(avatarID)]
-	return info, ok
+	return pick(s.byID, keys)
+}
+
+// lookupKeys lists the master keys to try, most specific first.
+func lookupKeys(avatarID, skillDepotID int) []string {
+	id := strconv.Itoa(avatarID)
+	if skillDepotID == 0 {
+		return []string{id}
+	}
+	return []string{id + "-" + strconv.Itoa(skillDepotID), id}
+}
+
+// pick returns the first key that resolves.
+//
+// **元素なしのエントリにも落ちる。** 旅人の `10000005` は新形式では
+// Element が "None" になるが、名前とアイコンは引けるので出せるものは出す。
+func pick(byID map[string]characterInfo, keys []string) (characterInfo, bool) {
+	for _, k := range keys {
+		if v, ok := byID[k]; ok {
+			return v, true
+		}
+	}
+	return characterInfo{}, false
 }
 
 func (s *characterStore) refresh(ctx context.Context) error {
@@ -356,7 +424,9 @@ func fetchAsset(ctx context.Context, client *http.Client, userAgent, name string
 		return nil, "", &upstreamError{status: http.StatusBadRequest, msg: "asset 名が不正です"}
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, assetBase+name+".png", nil)
+	// **拡張子は name に含まれている。** 決め打ちで足すと、名刺 (.jpg) を
+	// .png として要求することになる。
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, assetBase+name, nil)
 	if err != nil {
 		return nil, "", err
 	}
@@ -376,13 +446,30 @@ func fetchAsset(ctx context.Context, client *http.Client, userAgent, name string
 		return nil, "", err
 	}
 
-	// **取得元の Content-Type をそのまま流さない。** 扱うのは PNG だけと
-	// 決めているので、こちらで固定する。取得元が別の型を名乗ってもブラウザに
-	// 渡らない。
-	if ct := res.Header.Get("Content-Type"); !strings.HasPrefix(ct, "image/") {
+	// **取得元の Content-Type をそのまま流さない。** 画像であることだけ確かめ、
+	// 返す型はこちらで決める。取得元が別の型を名乗ってもブラウザには渡らない。
+	ct := res.Header.Get("Content-Type")
+	if !strings.HasPrefix(ct, "image/") {
 		return nil, "", &upstreamError{status: http.StatusBadGateway, msg: "画像ではない応答が返りました"}
 	}
-	return body, "image/png", nil
+	return body, normalizeImageType(ct), nil
+}
+
+// normalizeImageType maps an upstream Content-Type onto one we serve.
+//
+// 名刺は JPEG、アイコンは PNG。**PNG 決め打ちで返すと名刺が化ける**ので、
+// 扱うと決めた型の中から選ぶ。
+func normalizeImageType(ct string) string {
+	switch {
+	case strings.HasPrefix(ct, "image/jpeg"), strings.HasPrefix(ct, "image/jpg"):
+		return "image/jpeg"
+	case strings.HasPrefix(ct, "image/webp"):
+		return "image/webp"
+	case strings.HasPrefix(ct, "image/gif"):
+		return "image/gif"
+	default:
+		return "image/png"
+	}
 }
 
 // assetURL builds the same-origin proxy URL for a UI image.
@@ -401,7 +488,7 @@ func nameCardURL(ctx context.Context, store *characterStore, id int) string {
 	if id == 0 {
 		return ""
 	}
-	info, ok := store.Lookup(ctx, id)
+	info, ok := store.Lookup(ctx, id, 0)
 	if !ok {
 		return ""
 	}

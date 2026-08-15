@@ -409,8 +409,11 @@ func newEnkaClient(set settings) *enkaClient {
 		set: set, http: hc,
 		chars:     newCharacterStore(hc),
 		namecards: newNamecardStore(hc),
-		texts:     newTextStore(hc, locURL, set.Language),
-		uiTexts:   newTextStore(hc, uiLocURL, set.Language),
+		// **取得元は 1 つで足りる。** 旧形式ではキャラ名 (loc.json) と
+		// ステータス名 (gi/locs.json) が別ファイルだったが、新形式は
+		// gi/locs.json に統合されている。
+		texts:     newTextStore(hc, locsURL, set.Language),
+		uiTexts:   newTextStore(hc, locsURL, set.Language),
 		relicSets: newRelicSetStore(hc),
 	}
 }
@@ -520,7 +523,7 @@ func (c *enkaClient) fetch(ctx context.Context, uid string) (*snapshot, error) {
 			break
 		}
 		e := showcaseEntry{AvatarID: a.AvatarID, Level: a.Level}
-		if info, ok := c.chars.Lookup(ctx, a.AvatarID); ok {
+		if info, ok := c.chars.Lookup(ctx, a.AvatarID, 0); ok {
 			e.Icon = info.IconName()
 			e.Element = info.Element
 		}

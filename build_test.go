@@ -10,17 +10,26 @@ import (
 )
 
 // masterServer serves canned copies of Enka's static master data.
+//
+// **新形式 (store/gi/*.json) の形をなぞる。** アイコンはパスで来て拡張子まで
+// 含み、テキストは 1 ファイルに統合されている。旧形式の形でテストを書くと、
+// 移行できているかを検証できない (mk-plugin-genshin #1)。
 func masterServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	chars := `{"10000002":{"Element":"Ice","Consts":["C1","C2","C3","C4","C5","C6"],
-		"SkillOrder":[10024,10018,10019],
-		"Skills":{"10018":"Skill_S","10019":"Skill_E","10024":"Skill_A"},
-		"ProudMap":{"10018":232,"10019":239,"10024":231},
-		"NameTextMapHash":1006042610,"SideIconName":"UI_AvatarIcon_Side_Ayaka"}}`
-	// **わざと振り分ける。** 実際の取得元も収録範囲が違い、キャラ名は
-	// loc.json 側、武器名と聖遺物セット名は gi/locs.json 側にしか無い。
-	loc := `{"ja":{"1006042610":"神里綾華","222":"旧貴族のしつけ"},"en":{}}`
-	uiLoc := `{"ja":{"111":"天空の翼","333":"血染めの騎士道","444":"諧律奇想の断章",
+	avatars := `{
+		"10000002":{"Element":"Ice","Consts":["/ui/C1.png","/ui/C2.png","/ui/C3.png","/ui/C4.png","/ui/C5.png","/ui/C6.png"],
+			"SkillOrder":[10024,10018,10019],
+			"Skills":{"10018":"/ui/Skill_S.png","10019":"/ui/Skill_E.png","10024":"/ui/Skill_A.png"},
+			"ProudMap":{"10018":232,"10019":239,"10024":231},
+			"NameTextMapHash":1006042610,"SideIconName":"/ui/UI_AvatarIcon_Side_Ayaka.png"},
+		"10000117":{},
+		"10000117-11701":{"Element":"Fire","Consts":[],"SkillOrder":[],"Skills":{},"ProudMap":{},
+			"NameTextMapHash":1496871274,"SideIconName":"/ui/UI_AvatarIcon_Side_MannequinBoy.png"}
+	}`
+	// 新形式は 1 ファイルにキャラ名・武器名・セット名・ステータス名が揃う。
+	locs := `{"ja":{
+		"1006042610":"神里綾華","1496871274":"ドール（男）",
+		"111":"天空の翼","222":"旧貴族のしつけ","333":"血染めの騎士道","444":"諧律奇想の断章",
 		"FIGHT_PROP_HP":"HP","FIGHT_PROP_CRITICAL":"会心率",
 		"FIGHT_PROP_ATTACK":"攻撃力","FIGHT_PROP_DEFENSE":"防御力",
 		"FIGHT_PROP_ELEMENT_MASTERY":"元素熟知","FIGHT_PROP_CRITICAL_HURT":"会心ダメージ",
@@ -28,10 +37,12 @@ func masterServer(t *testing.T) *httptest.Server {
 		"FIGHT_PROP_BASE_ATTACK":"基礎攻撃力","FIGHT_PROP_ATTACK_PERCENT":"攻撃力"},"en":{}}`
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/characters.json", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(chars)) })
-	mux.HandleFunc("/loc.json", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(loc)) })
-	mux.HandleFunc("/uiloc.json", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(uiLoc)) })
-	// gi/relics.json 相当。Sets[].Name は gi/locs.json 側のキー。
+	mux.HandleFunc("/avatars.json", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(avatars)) })
+	mux.HandleFunc("/locs.json", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(locs)) })
+	// 名刺は .jpg。**PNG 決め打ちにすると化ける。**
+	mux.HandleFunc("/namecards.json", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"210042":{"Icon":"/ui/UI_NameCardPic_Ayaka_P.jpg"}}`))
+	})
 	mux.HandleFunc("/relics.json", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"Items":{},"Sets":{"15008":{"Name":"333"},"15035":{"Name":"444"}}}`))
 	})
@@ -47,9 +58,11 @@ func clientWithMasters(t *testing.T, enkaURL string) *enkaClient {
 	return &enkaClient{
 		set:       settings{Endpoint: enkaURL, UserAgent: "test/1.0", TimeoutSeconds: 5, Language: "ja"},
 		http:      hc,
-		chars:     &characterStore{client: hc, endpoint: m.URL + "/characters.json"},
-		texts:     &textStore{client: hc, endpoint: m.URL + "/loc.json", lang: "ja"},
-		uiTexts:   &textStore{client: hc, endpoint: m.URL + "/uiloc.json", lang: "ja"},
+		chars:     &characterStore{client: hc, endpoint: m.URL + "/avatars.json"},
+		namecards: &characterStore{client: hc, endpoint: m.URL + "/namecards.json"},
+		// 新形式は 1 ファイルなので、どちらも同じ取得元を指す。
+		texts:     &textStore{client: hc, endpoint: m.URL + "/locs.json", lang: "ja"},
+		uiTexts:   &textStore{client: hc, endpoint: m.URL + "/locs.json", lang: "ja"},
 		relicSets: &relicSetStore{client: hc, byID: map[string]string{"15008": "333", "15035": "444"}, fetched: time.Now()},
 	}
 }
@@ -108,7 +121,8 @@ func TestBuildCharacter_Basics(t *testing.T) {
 	if c.Friendship != 10 {
 		t.Errorf("好感度: %d", c.Friendship)
 	}
-	if c.Icon != "/api/plugin/genshin/asset/UI_AvatarIcon_Ayaka" {
+	// **新形式は拡張子まで含む。** 旧形式は名前だけだった。
+	if c.Icon != "/api/plugin/genshin/asset/UI_AvatarIcon_Ayaka.png" {
 		t.Errorf("アイコンが proxy 経由でない: %q", c.Icon)
 	}
 }
@@ -313,5 +327,48 @@ func TestTheaterLabel(t *testing.T) {
 	}
 	if got := theaterLabel(4, 0); got != "第4幕" {
 		t.Errorf("難易度不明のとき: %q", got)
+	}
+}
+
+// 旅人とドールは元素ごとに別のエントリを持つ。**skillDepotId を見ないと
+// 引けない** — 素の avatarId は空オブジェクトになっている。
+func TestBuildCharacter_SwitchableElement(t *testing.T) {
+	raw := rawAvatar{AvatarID: 10000117, SkillDepotID: 11701}
+	c := clientWithMasters(t, "").buildCharacter(context.Background(), raw)
+
+	if c.Name != "ドール（男）" {
+		t.Errorf("元素別のエントリを引けていない: %q", c.Name)
+	}
+	if c.Element != "Fire" {
+		t.Errorf("元素: %q", c.Element)
+	}
+	if c.Icon == "" {
+		t.Error("アイコンが引けていない")
+	}
+}
+
+// skillDepotId が無ければ素の avatarId で引く。**元素別のエントリしか
+// 無い相手では何も引けない**が、それは応答に情報が無いということ。
+func TestCharacterStore_LookupFallsBack(t *testing.T) {
+	c := clientWithMasters(t, "")
+	ctx := context.Background()
+
+	// 通常のキャラは skillDepotId が無くても引ける。
+	if info, ok := c.chars.Lookup(ctx, 10000002, 0); !ok || info.Element != "Ice" {
+		t.Errorf("通常のキャラを引けない: %+v", info)
+	}
+	// 存在しない depot なら素の id に落ちる (中身は空)。
+	if _, ok := c.chars.Lookup(ctx, 10000117, 99999); !ok {
+		t.Error("素の avatarId にも落ちていない")
+	}
+}
+
+// 名刺は .jpg。**拡張子を決め打ちにすると取り違える。**
+func TestNamecardKeepsExtension(t *testing.T) {
+	c := clientWithMasters(t, "")
+	got := nameCardURL(context.Background(), c.namecards, 210042)
+
+	if got != "/api/plugin/genshin/asset/UI_NameCardPic_Ayaka_P.jpg" {
+		t.Errorf("名刺の URL: %q", got)
 	}
 }

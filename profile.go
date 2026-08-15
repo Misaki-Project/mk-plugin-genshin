@@ -55,7 +55,7 @@ func buildProfile(c context.Context, db *sql.DB, client *enkaClient, userID stri
 	// `img-src 'self'` なので、取得元の URL を渡しても表示できない。
 	profileIconURL := ""
 	if id, convErr := strconv.Atoi(profileIcon); convErr == nil && id != 0 {
-		if info, ok := client.chars.Lookup(c, id); ok {
+		if info, ok := client.chars.Lookup(c, id, 0); ok {
 			profileIconURL = assetURL(info.IconName())
 		}
 	}

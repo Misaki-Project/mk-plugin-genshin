@@ -78,7 +78,13 @@ type stat struct {
 
 type rawAvatar struct {
 	AvatarID int `json:"avatarId"`
-	PropMap  map[string]struct {
+	// SkillDepotID identifies which element a switchable character is on.
+	//
+	// **旅人とドールはこれが無いと引けない。** マスター側は
+	// `10000117-11701` のように元素ごとの別エントリになっていて、素の
+	// `10000117` には中身が無い。
+	SkillDepotID int `json:"skillDepotId"`
+	PropMap      map[string]struct {
 		Val string `json:"val"`
 	} `json:"propMap"`
 	FightPropMap            map[string]float64 `json:"fightPropMap"`
@@ -194,7 +200,7 @@ func (c *enkaClient) buildCharacter(ctx context.Context, raw rawAvatar) characte
 		ConstIcons:    []string{},
 	}
 
-	info, hasInfo := c.chars.Lookup(ctx, raw.AvatarID)
+	info, hasInfo := c.chars.Lookup(ctx, raw.AvatarID, raw.SkillDepotID)
 	if hasInfo {
 		out.Icon = assetURL(info.IconName())
 		out.Element = info.Element
