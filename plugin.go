@@ -220,7 +220,7 @@ func routes(ctx plugin.Context, r plugin.Router) error {
 
 		// 見つからなければリモート利用者かもしれない。相手のインスタンスに
 		// 取り寄せを頼む (mk-go #2537 の peer channel、AP には出ない)。
-		return remoteLookup(req.Context(), ctx, db, body.UserID)
+		return remoteLookup(req.Context(), ctx, db, req.UserID(), body.UserID)
 	})
 
 	// 画像プロキシ。本体の CSP は `img-src 'self'` なので、外部の画像を

@@ -119,6 +119,9 @@ func registerPeer(ctx plugin.Context, db *sql.DB, client *enkaClient) {
 //
 // **mk-go の API を通す。** DB を直接見ると、凍結や可視性の判断を自分で
 // 実装することになる (プラグインからは本体のテーブルを読めない)。
+//
+// ここは匿名でよい。`ugcVisibilityForVisitor` のゲートが効くのは**リモート**
+// 利用者を引くときだけで (mk-go #2106)、自分のところの利用者は匿名でも引ける。
 func localUserIDByUsername(c context.Context, ctx plugin.Context, username string) (string, error) {
 	api := ctx.API()
 	if api == nil {
@@ -219,8 +222,8 @@ func remoteProfile(c context.Context, db *sql.DB, host, username string) (json.R
 // **その場では取りに行けない。** peer channel は非同期なので、初回は
 // 「まだ無い」を返して問い合わせだけ出す。届いた分は次に開いたときに出る
 // (取得元の ttl を待つ既存の作りと同じ考え方)。
-func remoteLookup(c context.Context, ctx plugin.Context, db *sql.DB, userID string) (any, error) {
-	host, username, err := remoteAcct(c, ctx, userID)
+func remoteLookup(c context.Context, ctx plugin.Context, db *sql.DB, viewerID, userID string) (any, error) {
+	host, username, err := remoteAcct(c, ctx, viewerID, userID)
 	if err != nil || host == "" {
 		// **エラーにしない。** そもそも原神と関係のない利用者のプロフィールを
 		// 開いただけかもしれない。表示側は linked:false で何も描かない。
@@ -270,12 +273,21 @@ func ask(c context.Context, ctx plugin.Context, db *sql.DB, host, username strin
 }
 
 // remoteAcct resolves a user id to its host and username.
-func remoteAcct(c context.Context, ctx plugin.Context, userID string) (host, username string, err error) {
+//
+// **閲覧者として引く。** 匿名で引くと、`ugcVisibilityForVisitor` が `local`
+// (既定) のインスタンスではリモート利用者が NO_SUCH_USER になり、問い合わせ
+// 自体を出せない (mk-go #2106 のゲート)。未ログインの閲覧者では引けないままだが、
+// それは「未ログインにリモートの情報を見せない」という設定どおりの挙動。
+func remoteAcct(c context.Context, ctx plugin.Context, viewerID, userID string) (host, username string, err error) {
 	api := ctx.API()
 	if api == nil {
 		return "", "", nil
 	}
-	raw, err := api.Anonymous().Call(c, "users/show", map[string]any{"userId": userID})
+	caller := api.Anonymous()
+	if viewerID != "" {
+		caller = api.AsUser(viewerID)
+	}
+	raw, err := caller.Call(c, "users/show", map[string]any{"userId": userID})
 	if err != nil {
 		return "", "", err
 	}
