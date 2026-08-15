@@ -1,0 +1,116 @@
+# mk-plugin-genshin
+
+[mk-go](https://github.com/shiroha-a/mk) のサーバープラグイン。利用者が原神の UID を登録すると、プロフィールに戦績とショーケースのビルドを表示する。
+
+データ元は [Enka.Network](https://enka.network/)。認証不要の公開 API を使う。
+
+```
+プロフィール
+┌──────────────────────────────────────┐
+│ ● しろは                              │  ← 名刺を背景に敷く
+│   AR60  世界8  螺旋12-3 ★36  実績1412 │
+│                                      │
+│ [綺良々][ナヒーダ][鍾離][閑雲] ← タップ │
+│ ╭─ 綺良々 Lv.90 命ノ星座6 好感度10 ──╮ │
+│ │ 天賦 4 / 9+3 / 7+3                │ │
+│ │ 武器 聖顕の鍵 Lv.90 R1 ★5         │ │
+│ │ HP 57245  攻撃力 1184  会心 30.7% │ │
+│ │ 花 千岩牢固 — HP 4780             │ │
+│ │ 羽 花海甘露の光 — 攻撃力 311       │ │
+│ ╰──────────────────────────────────╯ │
+└──────────────────────────────────────┘
+```
+
+## 導入
+
+mk-go は**プラグインをビルド時に組み込む**。`plugins/` に置いてビルドし直す。
+
+```bash
+# mk-go のリポジトリルートで
+cd plugins
+git clone https://github.com/shiroha-a/mk-plugin-genshin genshin
+cd ..
+
+make build          # plugins/ を走査して取り込む
+```
+
+フロントエンドを持つので、**フロントエンドも作り直す**。
+
+```bash
+make uds-frontend-build   # 本番構成 (docker-uds)
+# または make e2e-frontend-build
+```
+
+そのうえで mk-go を再起動する。**再起動しないと画面が変わらない** — mk-go は起動時に一度だけ manifest を読むため。
+
+```bash
+make uds-up
+```
+
+> **注意**: 配布されている Docker image (`ghcr.io/shiroha-a/mk`) を pull するだけでは使えない。ビルド時組み込みなので、プラグインを使うインスタンスは自分でビルドする必要がある。
+
+導入の一般論は [mk-go の docs/plugins/operating.md](https://github.com/shiroha-a/mk/blob/develop/docs/plugins/operating.md) を参照。
+
+## 使い方
+
+利用者が **設定 → プロフィール** で UID を入力する。9〜10 桁の数字。
+
+登録時に一度だけ取得して存在を確かめるので、UID が間違っていればその場で分かる。以後は 10 分ごとのジョブが期限切れのものだけ取り直す。
+
+表示するには、ゲーム内で**キャラクター詳細を公開**しておく必要がある (プロフィール → 「キャラクター詳細を公開」)。飾っていないキャラや非公開のアカウントでは、名前と戦績だけになる。
+
+## 設定
+
+省略できる。既定で動く。
+
+```yaml
+# .config/default.yml
+plugins:
+  genshin:
+    enabled: true
+    endpoint: https://enka.network      # 取得元 (テスト用に差し替えられる)
+    userAgent: mk-go-plugin-genshin/0.1 (+https://github.com/shiroha-a/mk)
+    timeoutSeconds: 10
+    language: ja                        # 名前の言語 (loc.json の言語コード)
+```
+
+`language` は `en` / `zh-cn` / `ko` などに変えられる。指定した言語が無ければ英語に落ちる。
+
+## 表示する情報
+
+Enka から取れるものは一通り出す。
+
+**プレイヤー**: ニックネーム / 自己紹介 / 冒険ランク / 世界ランク / サーバー地域 / 達成実績数 / 深境螺旋の到達階と星数 / 幻想シアターの到達幕と星数 / 好感度Lv10 のキャラ数 / 名刺 / プロフィール画像
+
+**ショーケースのキャラ (最大8体)**: レベル / 突破段階 / 命ノ星座 (アイコン付き) / 好感度 / 天賦レベル (星座による強化を `+3` で併記) / 実数ステータス16項目 / 武器 (名前・レア度・レベル・精錬・基礎攻撃力とサブステ) / 聖遺物5部位 (セット名・レベル・レア度・メインステータス・サブステータス4つ)
+
+## 取得元への配慮
+
+Enka.Network が[利用条件として挙げている](https://github.com/EnkaNetwork/API-docs/blob/master/api_ja.md)ことを守っている。
+
+- **`ttl` を必ず待つ。** 応答が返す `ttl` 秒はキャッシュから返し、期限が切れたものだけ 10 分ごとのジョブで取り直す
+- **`User-Agent` を名乗る。** 既定でもインスタンスが分かる形で送る
+- **UID を列挙しない。** 取得するのは利用者が自分で登録した UID だけ
+
+画像は Enka から直接読まず、**同一オリジンで中継**する (`/api/plugin/genshin/asset/<name>`)。mk-go の CSP が `img-src 'self'` なので、緩めずに表示するため。中継したものは 1 日キャッシュする。
+
+## 開発
+
+```bash
+cd plugins/genshin && go test ./...
+```
+
+外部に出ないテストだけで完結する (Enka とマスターデータは `httptest` で差し替える)。
+
+**踏みやすい罠**をコード中のコメントに残してある。
+
+- **値の単位が 2 系統ある** — `fightPropMap` (キャラの実数ステータス) の割合系は 0-1 の小数、`flat` の `statValue` (武器・聖遺物) は表示用の値そのまま。混ぜると会心率が 5194% になる
+- **名前の取得元が 3 つに分かれている** — キャラ名は `loc.json`、武器名と一部のセット名は `gi/locs.json`、新しい聖遺物セットはアイコン名から set id を取って `gi/relics.json` 経由。片方だけ見ると名前が半分出ない
+- **天賦の並びは `SkillOrder` に従う** — `skillLevelMap` の反復順に頼ると通常攻撃と元素爆発が入れ替わる
+- **星座による天賦強化は proud id 側にある** — `proudSkillExtraLevelMap` のキーは skill id ではない
+- **`affixMap` は 0 始まり** — R5 は `4`
+- **ドキュメントと実データで名前が違う** — API ドキュメントは `nameTextHashMap` と書いているが実際は `nameTextMapHash`
+
+## ライセンス
+
+AGPL-3.0-only。mk-go 本体と同じ。
