@@ -154,10 +154,10 @@ func (c characterInfo) IconName() string {
 	if name == "" {
 		name = c.Icon
 	}
-	name = strings.TrimPrefix(name, assetPathPrefix)
 	if name == "" {
 		return ""
 	}
+	// 前置きの除去は assetURL 側で行う。ここは横顔から正面を導くだけ。
 	return strings.Replace(name, "_Side_", "_", 1)
 }
 
@@ -489,7 +489,12 @@ func normalizeImageType(ct string) string {
 
 // assetURL builds the same-origin proxy URL for a UI image.
 func assetURL(name string) string {
-	if name == "" {
+	// **前置きはここで剥がす。** マスター由来のアイコンはパスで来るが
+	// (`/ui/Skill_A_01.png`)、応答に入っている武器・聖遺物のアイコンは
+	// 名前だけ (`UI_EquipIcon_Bow_Dvalin`)。呼び出し側ごとに剥がすと必ず
+	// どれかを取りこぼすので、URL を組む 1 か所に寄せる。
+	name = strings.TrimPrefix(name, assetPathPrefix)
+	if name == "" || !assetNamePattern(name) {
 		return ""
 	}
 	return "/api/plugin/genshin/asset/" + name

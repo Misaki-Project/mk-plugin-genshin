@@ -389,3 +389,26 @@ func TestAssetFileName(t *testing.T) {
 		}
 	}
 }
+
+// マスター由来のアイコンはパス、応答由来のものは名前だけ。**混在するので
+// URL を組む 1 か所で吸収する** — 呼び出し側ごとに剥がすと必ず取りこぼす
+// (天賦アイコンで実際に踏んだ)。
+func TestAssetURL_StripsPath(t *testing.T) {
+	cases := map[string]string{
+		// マスター由来 (天賦・命ノ星座・キャラアイコン)
+		"/ui/Skill_A_01.png":          "/api/plugin/genshin/asset/Skill_A_01.png",
+		"/ui/UI_AvatarIcon_Ayaka.png": "/api/plugin/genshin/asset/UI_AvatarIcon_Ayaka.png",
+		// 応答由来 (武器・聖遺物)。拡張子は取得時に補う。
+		"UI_EquipIcon_Bow_Dvalin": "/api/plugin/genshin/asset/UI_EquipIcon_Bow_Dvalin",
+		// 通さないもの
+		"":                  "",
+		"/ui/":              "",
+		"/ui/../etc/passwd": "",
+		"a/b.png":           "",
+	}
+	for in, want := range cases {
+		if got := assetURL(in); got != want {
+			t.Errorf("assetURL(%q) = %q (期待 %q)", in, got, want)
+		}
+	}
+}
