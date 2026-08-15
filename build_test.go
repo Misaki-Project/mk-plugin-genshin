@@ -372,3 +372,20 @@ func TestNamecardKeepsExtension(t *testing.T) {
 		t.Errorf("名刺の URL: %q", got)
 	}
 }
+
+// **移行前に保存されたスナップショットは拡張子を持たない。** 補わないと、
+// ttl が切れて取り直すまでの間そこだけ画像が出ない (実際に踏んだ)。
+func TestAssetFileName(t *testing.T) {
+	cases := map[string]string{
+		// 古いスナップショット由来 (拡張子なし)
+		"UI_AvatarIcon_Venti": "UI_AvatarIcon_Venti.png",
+		// 新形式由来 (拡張子あり)。**足すと .jpg.png になって壊れる。**
+		"UI_NameCardPic_0_P.jpg":  "UI_NameCardPic_0_P.jpg",
+		"UI_AvatarIcon_Ayaka.png": "UI_AvatarIcon_Ayaka.png",
+	}
+	for in, want := range cases {
+		if got := assetFileName(in); got != want {
+			t.Errorf("assetFileName(%q) = %q (期待 %q)", in, got, want)
+		}
+	}
+}

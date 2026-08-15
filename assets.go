@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -98,6 +99,19 @@ var assetNamePattern = func() func(string) bool {
 		return true
 	}
 }()
+
+// assetFileName appends the default extension when the name has none.
+//
+// **移行前に保存されたスナップショットは拡張子を持たない** (`UI_AvatarIcon_Venti`)。
+// 新形式のマスターは拡張子込みのパスを持つが、DB に残っている古いデータは
+// そうではないので、補わないと ttl が切れて取り直すまでの間そこだけ画像が
+// 出なくなる (実際に踏んだ)。
+func assetFileName(name string) string {
+	if path.Ext(name) == "" {
+		return name + ".png"
+	}
+	return name
+}
 
 // assetPathPrefix is where Enka's master data points at UI images.
 //
@@ -426,7 +440,8 @@ func fetchAsset(ctx context.Context, client *http.Client, userAgent, name string
 
 	// **拡張子は name に含まれている。** 決め打ちで足すと、名刺 (.jpg) を
 	// .png として要求することになる。
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, assetBase+name, nil)
+	//
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, assetBase+assetFileName(name), nil)
 	if err != nil {
 		return nil, "", err
 	}
