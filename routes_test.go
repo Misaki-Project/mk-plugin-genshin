@@ -216,3 +216,45 @@ func TestJobs_RegistersSchedule(t *testing.T) {
 		t.Fatalf("想定と違う: %+v", jobs.Schedules)
 	}
 }
+
+// **Enka の応答から現行形式の id を拾って保存すること。**
+//
+// `profilePicture` は `{"id": 9100}` (現行) と `{"avatarId": 10000046}` (旧) の
+// 2 形式がある。現行を読まずに旧だけ見ていた頃は `0` が保存され、プロフィールの
+// アイコンが一切出なかった (本番の DB で実測)。保存形式まで見るのは、
+// **応答を読む所と id 空間を区別する所が別**だから — 片方だけ直しても出ない。
+func TestRoutes_StoresProfilePictureID(t *testing.T) {
+	for _, tt := range []struct {
+		name, picture, want string
+	}{
+		{"現行形式", `{"id":9100}`, "pfp:9100"},
+		{"旧形式", `{"avatarId":10000046}`, "10000046"},
+		{"両方あれば現行形式", `{"id":9100,"avatarId":10000046}`, "pfp:9100"},
+		{"どちらも無ければ空", `{}`, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			db := testDB(t)
+			srv := fakeEnka(t, http.StatusOK,
+				`{"playerInfo":{"nickname":"Traveler","level":60,"profilePicture":`+tt.picture+`},"ttl":300}`)
+			h := plugintest.New(t).
+				WithName("genshin").
+				WithDB(db).
+				WithConfig(map[string]any{"endpoint": srv.URL, "userAgent": "test/1.0", "timeoutSeconds": 5}).
+				Routes(Plugin)
+
+			if _, err := h.Call(t, "POST /me/set", plugintest.Request{
+				UserID: "u1", Body: `{"uid":"800000000"}`,
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			var got string
+			if err := db.QueryRow(`SELECT profile_icon FROM snapshots WHERE uid = '800000000'`).Scan(&got); err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Errorf("profile_icon = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

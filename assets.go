@@ -50,6 +50,13 @@ const assetBase = "https://enka.network/ui/"
 const (
 	avatarsURL   = "https://raw.githubusercontent.com/EnkaNetwork/API-docs/master/store/gi/avatars.json"
 	namecardsURL = "https://raw.githubusercontent.com/EnkaNetwork/API-docs/master/store/gi/namecards.json"
+	// pfpsURL is the profile picture master.
+	//
+	// **Enka は profilePicture を `{"id": 9100}` で返すようになった。** 旧形式の
+	// `{"avatarId": 10000046}` はキャラ id なので characters 側で引けるが、新しい
+	// id はプロフィール画像専用の id 空間で、そちらでは引けない (実測で `0` が
+	// 保存され、アイコンが出ていなかった)。185 件・15KB。
+	pfpsURL = "https://raw.githubusercontent.com/EnkaNetwork/API-docs/master/store/gi/pfps.json"
 	// locsURL maps text hashes to display names, and UI keys like
 	// `FIGHT_PROP_CRITICAL` to labels.
 	//
@@ -128,6 +135,8 @@ type characterInfo struct {
 	Element      string `json:"Element"`
 	// Icon is namecards.json's field.
 	Icon string `json:"icon"`
+	// IconPath is pfps.json's field (`/ui/UI_AvatarIcon_Citlali_Circle.png`)。
+	IconPath string `json:"IconPath"`
 	// NameTextMapHash resolves to the character name through loc.json.
 	NameTextMapHash int64 `json:"NameTextMapHash"`
 	// Consts holds the constellation icons in unlock order.
@@ -155,6 +164,9 @@ func (c characterInfo) IconName() string {
 		name = c.Icon
 	}
 	if name == "" {
+		name = c.IconPath
+	}
+	if name == "" {
 		return ""
 	}
 	// 前置きの除去は assetURL 側で行う。ここは横顔から正面を導くだけ。
@@ -179,6 +191,13 @@ func newCharacterStore(client *http.Client) *characterStore {
 // newNamecardStore reads the namecard id -> picture mapping.
 func newNamecardStore(client *http.Client) *characterStore {
 	return &characterStore{client: client, endpoint: namecardsURL}
+}
+
+// newPfpStore returns the store for profile pictures.
+//
+// キャラ id とは**別の id 空間**なので、characters とは別に持つ。
+func newPfpStore(client *http.Client) *characterStore {
+	return &characterStore{client: client, endpoint: pfpsURL}
 }
 
 // Lookup returns the character info for an avatarId.
@@ -537,4 +556,52 @@ func theaterLabel(act, mode int) string {
 		s += " (難易度" + strconv.Itoa(mode) + ")"
 	}
 	return s
+}
+
+// pfpKeyPrefix marks a profile picture id in the stored value.
+//
+// **id 空間が 2 つある。** 現行の `profilePicture.id` (1..9100 程度) と旧形式の
+// `avatarId` (10000002 以降) は別の master で引くので、保存した数値だけでは
+// どちらか分からない。実際には桁が重ならないが、そこに依存すると Enka が
+// id を増やしたときに黙って別のアイコンを出す。
+const pfpKeyPrefix = "pfp:"
+
+// profileIconKey renders the stored form of a profile picture.
+//
+// 現行形式を優先する。どちらも無ければ空 (アイコンを出さない)。
+func profileIconKey(pfpID, avatarID int) string {
+	if pfpID != 0 {
+		return pfpKeyPrefix + strconv.Itoa(pfpID)
+	}
+	if avatarID != 0 {
+		return strconv.Itoa(avatarID)
+	}
+	return ""
+}
+
+// profileIconURL resolves the stored form to a proxied icon URL.
+//
+// 引けなければ空を返す。アイコンが出ないだけで、カードそのものは成立させる。
+func profileIconURL(ctx context.Context, pfps, chars *characterStore, stored string) string {
+	if id, ok := strings.CutPrefix(stored, pfpKeyPrefix); ok {
+		n, err := strconv.Atoi(id)
+		if err != nil || n == 0 {
+			return ""
+		}
+		info, found := pfps.Lookup(ctx, n, 0)
+		if !found {
+			return ""
+		}
+		return assetURL(info.IconName())
+	}
+	// 旧形式 (キャラ id)。"0" と空は「未設定」。
+	n, err := strconv.Atoi(stored)
+	if err != nil || n == 0 {
+		return ""
+	}
+	info, found := chars.Lookup(ctx, n, 0)
+	if !found {
+		return ""
+	}
+	return assetURL(info.IconName())
 }

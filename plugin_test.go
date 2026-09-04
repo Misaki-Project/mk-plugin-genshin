@@ -179,3 +179,62 @@ func TestFetch_WithoutAvatarInfoList(t *testing.T) {
 		t.Errorf("characters が空でない: %d", len(got.characters))
 	}
 }
+
+// プロフィール画像の id 空間が 2 つあることを保存形式で区別する。
+//
+// **Enka は `profilePicture` を `{"id": 9100}` で返すようになった。** 旧形式の
+// `{"avatarId": 10000046}` はキャラ id なので characters で引けるが、新しい id は
+// プロフィール画像専用の id 空間で引く先が違う。区別せず数値だけを保存していた
+// 頃は `0` が入り、**アイコンが一切出なかった** (本番の DB で実測)。
+func TestProfileIconKey(t *testing.T) {
+	for _, tt := range []struct {
+		name            string
+		pfpID, avatarID int
+		want            string
+	}{
+		{"現行形式を優先する", 9100, 10000046, "pfp:9100"},
+		{"現行形式のみ", 9100, 0, "pfp:9100"},
+		{"旧形式のみ", 0, 10000046, "10000046"},
+		{"どちらも無ければ空", 0, 0, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := profileIconKey(tt.pfpID, tt.avatarID); got != tt.want {
+				t.Errorf("profileIconKey(%d, %d) = %q, want %q", tt.pfpID, tt.avatarID, got, tt.want)
+			}
+		})
+	}
+}
+
+// 保存形式からアイコンを引く。**引く先を間違えないこと**が要点で、
+// `pfp:` の付いていない値をプロフィール画像の master で引くと別人が出る。
+func TestProfileIconURL(t *testing.T) {
+	pfps := &characterStore{
+		byID:    map[string]characterInfo{"9100": {IconPath: "/ui/UI_AvatarIcon_Citlali_Circle.png"}},
+		fetched: time.Now(),
+	}
+	chars := &characterStore{
+		byID:    map[string]characterInfo{"10000046": {SideIconName: "UI_AvatarIcon_Side_Hutao"}},
+		fetched: time.Now(),
+	}
+	ctx := context.Background()
+
+	for _, tt := range []struct {
+		name, stored, want string
+	}{
+		{"現行形式", "pfp:9100", "/api/plugin/genshin/asset/UI_AvatarIcon_Citlali_Circle.png"},
+		{"旧形式", "10000046", "/api/plugin/genshin/asset/UI_AvatarIcon_Hutao"},
+		// **id 空間を跨いで引かないこと。** 同じ数値でも master が違う。
+		{"現行形式の id を旧形式として渡しても引けない", "9100", ""},
+		{"旧形式の id を現行形式として渡しても引けない", "pfp:10000046", ""},
+		{"未設定 (旧形式のゼロ)", "0", ""},
+		{"未設定 (空)", "", ""},
+		{"現行形式のゼロ", "pfp:0", ""},
+		{"数値でない", "pfp:zzz", ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := profileIconURL(ctx, pfps, chars, tt.stored); got != tt.want {
+				t.Errorf("profileIconURL(%q) = %q, want %q", tt.stored, got, tt.want)
+			}
+		})
+	}
+}

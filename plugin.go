@@ -17,8 +17,6 @@ import (
 	"time"
 
 	"github.com/shiroha-a/mk/plugin"
-	"strconv"
-
 	"github.com/shiroha-a/mk/plugin/peercache"
 )
 
@@ -362,7 +360,7 @@ func saveSnapshot(c context.Context, db *sql.DB, s *snapshot) error {
 			fetter_count = EXCLUDED.fetter_count, characters = EXCLUDED.characters
 	`, s.uid, s.nickname, s.level, s.worldLevel, s.signature, s.ttl,
 		s.nameCardID, s.region, s.achievements, s.towerFloor, s.towerLevel,
-		strconv.Itoa(s.profileIcon), showcase,
+		s.profileIcon, showcase,
 		s.towerStar, s.theaterAct, s.theaterMode, s.theaterStar, s.fetterCount, characters)
 	return err
 }
@@ -385,8 +383,11 @@ type snapshot struct {
 	theaterMode  int
 	theaterStar  int
 	fetterCount  int
-	profileIcon  int
-	showcase     []showcaseEntry
+	// profileIcon は保存する形そのもの。新形式は `pfp:<id>`、旧形式は
+	// キャラ id の 10 進表記。**どちらの id 空間かを区別するため**に接頭辞を
+	// 付ける (数値だけだと引く先を間違える)。
+	profileIcon string
+	showcase    []showcaseEntry
 	// characters holds the full build of each showcased character.
 	characters []character
 	ttl        int
@@ -432,6 +433,7 @@ func newEnkaClient(set settings) *enkaClient {
 		set: set, http: hc,
 		chars:     newCharacterStore(hc),
 		namecards: newNamecardStore(hc),
+		pfps:      newPfpStore(hc),
 		// **取得元は 1 つで足りる。** 旧形式ではキャラ名 (loc.json) と
 		// ステータス名 (gi/locs.json) が別ファイルだったが、新形式は
 		// gi/locs.json に統合されている。
@@ -496,7 +498,10 @@ func (c *enkaClient) fetch(ctx context.Context, uid string) (*snapshot, error) {
 			TheaterStarIndex     int    `json:"theaterStarIndex"`
 			FetterCount          int    `json:"fetterCount"`
 			ProfilePicture       struct {
+				// AvatarID は旧形式 (キャラ id)。
 				AvatarID int `json:"avatarId"`
+				// ID は現行形式 (プロフィール画像専用の id 空間)。
+				ID int `json:"id"`
 			} `json:"profilePicture"`
 			ShowAvatarInfoList []struct {
 				AvatarID int `json:"avatarId"`
@@ -526,7 +531,7 @@ func (c *enkaClient) fetch(ctx context.Context, uid string) (*snapshot, error) {
 		theaterMode: pi.TheaterModeIndex,
 		theaterStar: pi.TheaterStarIndex,
 		fetterCount: pi.FetterCount,
-		profileIcon: pi.ProfilePicture.AvatarID, ttl: ttl,
+		profileIcon: profileIconKey(pi.ProfilePicture.ID, pi.ProfilePicture.AvatarID), ttl: ttl,
 		characters: make([]character, 0, len(parsed.AvatarInfoList)),
 	}
 

@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"strconv"
 	"time"
 )
 
@@ -53,12 +52,7 @@ func buildProfile(c context.Context, db *sql.DB, client *enkaClient, userID stri
 
 	// アイコンは**自分のプロキシ経由の URL**として返す。CSP が
 	// `img-src 'self'` なので、取得元の URL を渡しても表示できない。
-	profileIconURL := ""
-	if id, convErr := strconv.Atoi(profileIcon); convErr == nil && id != 0 {
-		if info, ok := client.chars.Lookup(c, id, 0); ok {
-			profileIconURL = assetURL(info.IconName())
-		}
-	}
+	iconURL := profileIconURL(c, client.pfps, client.chars, profileIcon)
 	cards := make([]map[string]any, 0, len(showcase))
 	for _, e := range showcase {
 		cards = append(cards, map[string]any{
@@ -81,7 +75,7 @@ func buildProfile(c context.Context, db *sql.DB, client *enkaClient, userID stri
 		"theaterStars":  theaterStar,
 		"fetterCount":   fetterCount,
 		"characters":    characters,
-		"profileIcon":   profileIconURL,
+		"profileIcon":   iconURL,
 		"nameCard":      nameCardURL(c, client.namecards, nameCardID),
 		"showcase":      cards,
 		"fetchedAt":     fetchedAt,
