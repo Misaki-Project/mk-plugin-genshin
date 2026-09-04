@@ -3,10 +3,12 @@ package genshin
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/shiroha-a/mk/plugin"
+	"github.com/shiroha-a/mk/plugin/plugintest"
 )
 
 // 相手のインスタンスのプロキシ URL を、こちらのプロキシ URL に貼り替えること。
@@ -138,5 +140,114 @@ func TestRemoteAcct_LocalUser(t *testing.T) {
 	}
 	if host != "" {
 		t.Errorf("ローカル利用者に host を返した: %q", host)
+	}
+}
+
+// --- peer channel ---
+
+// peerHarness wires the plugin's peer callback against a throwaway schema.
+//
+// **`h.Peer(Plugin)` を通す (mk-go #2819)。** 登録は Definition.Peer にあるので、
+// Routes だけではハンドラが 1 つも入らない。
+func peerHarness(t *testing.T, api plugin.API) (*plugintest.Harness, plugintest.Handlers) {
+	t.Helper()
+	srv := fakeEnka(t, http.StatusOK,
+		`{"playerInfo":{"nickname":"Traveler","level":60,"worldLevel":8,"signature":"hi"},"ttl":300}`)
+	h := plugintest.New(t).
+		WithName("genshin").
+		WithDB(testDB(t)).
+		WithAPI(api).
+		WithPeers("other.example").
+		WithConfig(map[string]any{"endpoint": srv.URL, "userAgent": "test/1.0", "timeoutSeconds": 5})
+	h.Peer(Plugin)
+	return h, h.Routes(Plugin)
+}
+
+// 相手から聞かれたら、自分のところの利用者の分だけ答える。
+func TestPeer_AnswersForLocalUser(t *testing.T) {
+	api := &fakeAPI{resp: json.RawMessage(`{"id":"u1","host":null}`)}
+	h, routes := peerHarness(t, api)
+
+	if _, err := routes.Call(t, "POST /me/set", plugintest.Request{
+		UserID: "u1", Body: `{"uid":"800000000"}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := h.DeliverPeer("other.example", peerRequest{Username: "alice"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := res.(peerResponse)
+	if !ok {
+		t.Fatalf("応答の型が違う: %T", res)
+	}
+	if !got.Linked || len(got.Profile) == 0 {
+		t.Fatalf("登録済みの利用者なのに linked が立っていない: %+v", got)
+	}
+}
+
+// UID を登録していない利用者は linked=false。
+func TestPeer_AnswersUnlinked(t *testing.T) {
+	api := &fakeAPI{resp: json.RawMessage(`{"id":"u9","host":null}`)}
+	h, _ := peerHarness(t, api)
+
+	res, err := h.DeliverPeer("other.example", peerRequest{Username: "nobody"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := res.(peerResponse); got.Linked {
+		t.Fatalf("登録していないのに linked: %+v", got)
+	}
+}
+
+// **リモート利用者を開いたら問い合わせが出る。** 初回は空で返る。
+func TestRemoteLookup_AsksThenServesCache(t *testing.T) {
+	api := &fakeAPI{resp: json.RawMessage(`{"id":"u2","host":"other.example","username":"alice"}`)}
+	h, _ := peerHarness(t, api)
+	ctx := h.Context()
+	db := ctx.Storage().DB()
+
+	got, err := remoteLookup(context.Background(), ctx, db, "viewer", "u2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := got.(map[string]any); m["linked"] != false {
+		t.Fatalf("初回は空で返るはず: %+v", m)
+	}
+
+	sends := h.PeerSends()
+	if len(sends) != 1 {
+		t.Fatalf("問い合わせが 1 件出るはず: %+v", sends)
+	}
+	if sends[0].Host != "other.example" {
+		t.Fatalf("宛先が違う: %+v", sends[0])
+	}
+
+	// 応答が届いたら次から出る。
+	if err := h.DeliverPeerReply("other.example", sends[0].ID, peerResponse{
+		Linked: true,
+		Profile: json.RawMessage(
+			`{"linked":true,"nickname":"Remote",` +
+				`"profileIcon":"https://other.example/api/plugin/genshin/asset/UI_A"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err = remoteLookup(context.Background(), ctx, db, "viewer", "u2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := got.(map[string]any)
+	if m["nickname"] != "Remote" {
+		t.Fatalf("キャッシュから返らない: %+v", m)
+	}
+	// **相手のホストを残さない。** そのまま出すと CSP で表示できないうえ、
+	// 閲覧者の接続先が相手に漏れる。
+	out, _ := json.Marshal(m)
+	if strings.Contains(string(out), "other.example") {
+		t.Errorf("相手のホストが残っている: %s", out)
+	}
+	if !strings.Contains(string(out), "/api/plugin/genshin/asset/UI_A") {
+		t.Errorf("こちらのプロキシに貼り替わっていない: %s", out)
 	}
 }

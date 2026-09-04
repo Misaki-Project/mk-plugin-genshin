@@ -14,10 +14,12 @@ import (
 	"io"
 	"net/http"
 	"regexp"
-	"strconv"
 	"time"
 
 	"github.com/shiroha-a/mk/plugin"
+	"strconv"
+
+	"github.com/shiroha-a/mk/plugin/peercache"
 )
 
 // Plugin is the entry point referenced by the generated registration code.
@@ -25,12 +27,15 @@ var Plugin = plugin.Definition{
 	Name:       "genshin",
 	Version:    "0.1.0",
 	APIVersion: plugin.APIVersion,
-	Migrations: migrations,
+	Migrations: append(migrations, peerCacheMigration...),
 	Routes:     routes,
 	Jobs:       jobs,
 	// 同じプラグインを入れた mk-go 同士で、リモート利用者の戦績を取り寄せる。
 	// ActivityPub には出ない経路 (mk-go #2537)。
 	Peered: true,
+	// **登録はここ (mk-go #2819)。** Routes の中でやると、ロールを分割した
+	// 構成で応答が届かない (送信の POST は queue ロールで走る)。
+	Peer: peer,
 }
 
 // settings mirrors the `plugins.genshin` section of the instance config.
@@ -59,6 +64,25 @@ func loadSettings(ctx plugin.Context) (settings, error) {
 		return s, err
 	}
 	return s, nil
+}
+
+// peerCacheMigration replaces the hand-written remote cache with
+// plugin/peercache (mk-go #2820)。**中身はキャッシュなので捨ててよい。**
+var peerCacheMigration = append([]plugin.Migration{{
+	Version: 6,
+	SQL: `
+		DROP TABLE IF EXISTS remote_snapshots;
+		DROP TABLE IF EXISTS remote_pending;
+	`,
+}}, peercache.Migrations(7)...)
+
+// peer registers both directions of the plugin channel.
+func peer(ctx plugin.Context, p plugin.Peer) error {
+	set, err := loadSettings(ctx)
+	if err != nil {
+		return err
+	}
+	return registerPeer(ctx, p, ctx.Storage().DB(), newEnkaClient(set))
 }
 
 var migrations = []plugin.Migration{
@@ -129,9 +153,6 @@ func routes(ctx plugin.Context, r plugin.Router) error {
 	}
 	db := ctx.Storage().DB()
 	client := newEnkaClient(set)
-
-	// 同じプラグインを入れた mk-go 同士のやりとり (mk-go #2537)。
-	registerPeer(ctx, db, client)
 
 	// frontend から呼ぶものは POST にする。misskeyApi (= host.api) が POST
 	// 固定で、Misskey 本体の API も POST 基本なのでそれに倣う。
@@ -394,6 +415,8 @@ type enkaClient struct {
 	http      *http.Client
 	chars     *characterStore
 	namecards *characterStore
+	// pfps はプロフィール画像の id -> アイコン。キャラ id とは別の id 空間。
+	pfps *characterStore
 	// texts resolves name hashes (キャラ / 武器 / 聖遺物セット)。
 	texts *textStore
 	// uiTexts resolves UI keys like FIGHT_PROP_CRITICAL.
