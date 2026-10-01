@@ -5,18 +5,20 @@
 
 import { definePlugin } from '@/plugin-api.js';
 import { initApi } from './api.js';
-import ProfileCard from './ProfileCard.vue';
+import ProfileCards from './ProfileCards.vue';
 import SettingsSection from './SettingsSection.vue';
+import Rankings from './Rankings.vue';
 
 export default definePlugin({
 	name: 'genshin',
+	pages: [{ path: '/rankings', component: Rankings, navTitle: '原神ランキング', navIcon: 'ti ti-trophy', explore: true }],
 
 	setup(host) {
 		initApi(host.api);
 
 		// Vue コンポーネント形式で登録する。ホストのアプリ内で描画されるので
 		// MkInput などが本体と同じ見た目・挙動で動く。
-		host.slot('profile:info', { component: ProfileCard });
+		host.slot('profile:info', { component: ProfileCards });
 
 		// 未ログインでは設定画面自体が出ないが、念のため。
 		if (host.me != null) {

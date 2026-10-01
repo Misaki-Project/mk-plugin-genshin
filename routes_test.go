@@ -1,6 +1,7 @@
 package genshin
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"net/http"
@@ -66,6 +67,7 @@ func setupRoutes(t *testing.T, enkaURL string) plugintest.Handlers {
 	return plugintest.New(t).
 		WithName("genshin").
 		WithDB(testDB(t)).
+		WithAPI(defaultLinkingAPI()).
 		WithConfig(map[string]any{"endpoint": enkaURL, "userAgent": "test/1.0", "timeoutSeconds": 5}).
 		Routes(Plugin)
 }
@@ -73,11 +75,9 @@ func setupRoutes(t *testing.T, enkaURL string) plugintest.Handlers {
 func TestRoutes_SetAndShowProfile(t *testing.T) {
 	srv := fakeEnka(t, http.StatusOK,
 		`{"playerInfo":{"nickname":"Traveler","level":60,"worldLevel":8,"signature":"hi"},"ttl":300}`)
-	h := setupRoutes(t, srv.URL)
-
-	if _, err := h.Call(t, "POST /me/set", plugintest.Request{UserID: "u1", Body: `{"uid":"800000000"}`}); err != nil {
-		t.Fatal(err)
-	}
+	db := testDB(t)
+	h := plugintest.New(t).WithName("genshin").WithDB(db).WithAPI(defaultLinkingAPI()).WithConfig(map[string]any{"endpoint": srv.URL}).Routes(Plugin)
+	seedVerifiedSnapshot(t, db, srv.URL)
 
 	res, err := h.Call(t, "POST /profile", plugintest.Request{Body: `{"userId":"u1"}`})
 	if err != nil {
@@ -120,47 +120,55 @@ func TestRoutes_RejectsUnknownUID(t *testing.T) {
 	srv := fakeEnka(t, http.StatusNotFound, `{}`)
 	h := setupRoutes(t, srv.URL)
 
-	_, err := h.Call(t, "POST /me/set", plugintest.Request{UserID: "u1", Body: `{"uid":"800000000"}`})
+	res, err := h.Call(t, "POST /me/begin", plugintest.Request{UserID: "u1", Body: `{"uid":"800000000"}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := res.(challenge)
+	_, err = h.Call(t, "POST /me/verify", plugintest.Request{UserID: "u1", Body: fmt.Sprintf(`{"code":%q}`, p.Code)})
 	if err == nil {
 		t.Fatal("エラーにならない")
 	}
-	if !strings.Contains(err.Error(), "見つかりません") {
+	if !strings.Contains(err.Error(), "取得できません") {
 		t.Fatalf("理由が伝わらない: %v", err)
 	}
 }
 
-// 上流の一時的な不調では登録を拒まない (直るまで設定できないのは困る)。
-func TestRoutes_SavesDespiteUpstreamOutage(t *testing.T) {
+// 本人確認用の上流が停止中なら、未検証UIDは登録してはいけない。
+func TestRoutes_DoesNotLinkDuringUpstreamOutage(t *testing.T) {
 	srv := fakeEnka(t, http.StatusFailedDependency, `{"message":"game servers down"}`)
 	h := setupRoutes(t, srv.URL)
 
-	if _, err := h.Call(t, "POST /me/set", plugintest.Request{UserID: "u1", Body: `{"uid":"800000000"}`}); err != nil {
-		t.Fatalf("登録できるべき: %v", err)
+	begin, err := h.Call(t, "POST /me/begin", plugintest.Request{UserID: "u1", Body: `{"uid":"800000000"}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := begin.(challenge)
+	if _, err := h.Call(t, "POST /me/verify", plugintest.Request{UserID: "u1", Body: fmt.Sprintf(`{"code":%q}`, p.Code)}); err == nil {
+		t.Fatal("未確認UIDを登録した")
 	}
 
 	res, err := h.Call(t, "POST /me", plugintest.Request{UserID: "u1"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.(map[string]any)["uid"] != "800000000" {
-		t.Fatalf("保存されていない: %+v", res)
+	if len(res.(map[string]any)["uids"].([]string)) != 0 {
+		t.Fatalf("未確認UIDが保存された: %+v", res)
 	}
 }
 
-// 空文字で登録解除できること (UI から消せないと不便)。
-func TestRoutes_UnlinkWithEmptyUID(t *testing.T) {
+// 指定UIDだけを解除できること。
+func TestRoutes_UnlinkUID(t *testing.T) {
 	srv := fakeEnka(t, http.StatusOK, `{"playerInfo":{"nickname":"x","level":1},"ttl":60}`)
-	h := setupRoutes(t, srv.URL)
-
-	if _, err := h.Call(t, "POST /me/set", plugintest.Request{UserID: "u1", Body: `{"uid":"800000000"}`}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := h.Call(t, "POST /me/set", plugintest.Request{UserID: "u1", Body: `{"uid":""}`}); err != nil {
+	db := testDB(t)
+	h := plugintest.New(t).WithName("genshin").WithDB(db).WithAPI(defaultLinkingAPI()).Routes(Plugin)
+	seedVerifiedSnapshot(t, db, srv.URL)
+	if _, err := h.Call(t, "POST /me/unlink", plugintest.Request{UserID: "u1", Body: `{"uid":"800000000"}`}); err != nil {
 		t.Fatal(err)
 	}
 
 	res, _ := h.Call(t, "POST /me", plugintest.Request{UserID: "u1"})
-	if res.(map[string]any)["uid"] != nil {
+	if len(res.(map[string]any)["uids"].([]string)) != 0 {
 		t.Fatalf("解除されていない: %+v", res)
 	}
 }
@@ -169,7 +177,7 @@ func TestRoutes_RejectsBadUIDFormat(t *testing.T) {
 	srv := fakeEnka(t, http.StatusOK, `{}`)
 	h := setupRoutes(t, srv.URL)
 
-	if _, err := h.Call(t, "POST /me/set", plugintest.Request{UserID: "u1", Body: `{"uid":"abc"}`}); err == nil {
+	if _, err := h.Call(t, "POST /me/begin", plugintest.Request{UserID: "u1", Body: `{"uid":"abc"}`}); err == nil {
 		t.Fatal("形式不正を弾いていない")
 	}
 }
@@ -182,10 +190,8 @@ func TestJobs_RefreshKeepsStaleOnFailure(t *testing.T) {
 	harness := plugintest.New(t).WithName("genshin").WithDB(db)
 
 	ok := fakeEnka(t, http.StatusOK, `{"playerInfo":{"nickname":"Old","level":10},"ttl":-1}`)
-	routes := harness.WithConfig(map[string]any{"endpoint": ok.URL, "timeoutSeconds": 5}).Routes(Plugin)
-	if _, err := routes.Call(t, "POST /me/set", plugintest.Request{UserID: "u1", Body: `{"uid":"800000000"}`}); err != nil {
-		t.Fatal(err)
-	}
+	harness.WithConfig(map[string]any{"endpoint": ok.URL, "timeoutSeconds": 5}).Routes(Plugin)
+	seedVerifiedSnapshot(t, db, ok.URL)
 
 	// 期限切れにしてから、上流が落ちている状態で更新を走らせる。
 	if _, err := db.Exec(`UPDATE snapshots SET expires_at = now() - interval '1 hour'`); err != nil {
@@ -236,17 +242,13 @@ func TestRoutes_StoresProfilePictureID(t *testing.T) {
 			db := testDB(t)
 			srv := fakeEnka(t, http.StatusOK,
 				`{"playerInfo":{"nickname":"Traveler","level":60,"profilePicture":`+tt.picture+`},"ttl":300}`)
-			h := plugintest.New(t).
+			plugintest.New(t).
 				WithName("genshin").
 				WithDB(db).
 				WithConfig(map[string]any{"endpoint": srv.URL, "userAgent": "test/1.0", "timeoutSeconds": 5}).
 				Routes(Plugin)
 
-			if _, err := h.Call(t, "POST /me/set", plugintest.Request{
-				UserID: "u1", Body: `{"uid":"800000000"}`,
-			}); err != nil {
-				t.Fatal(err)
-			}
+			seedVerifiedSnapshot(t, db, srv.URL)
 
 			var got string
 			if err := db.QueryRow(`SELECT profile_icon FROM snapshots WHERE uid = '800000000'`).Scan(&got); err != nil {
@@ -256,5 +258,24 @@ func TestRoutes_StoresProfilePictureID(t *testing.T) {
 				t.Errorf("profile_icon = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func defaultLinkingAPI() *linkingAPI { a := &linkingAPI{}; a.limit.Store(1); return a }
+
+// Profile/job tests seed a verified registration so they can test rendering and
+// refresh independently. Ownership proof is covered by linking_test.go.
+func seedVerifiedSnapshot(t *testing.T, db *sql.DB, endpoint string) {
+	t.Helper()
+	if _, err := db.Exec(`INSERT INTO accounts(user_id,uid) VALUES('u1','800000000')`); err != nil {
+		t.Fatal(err)
+	}
+	c := newEnkaClient(settings{Endpoint: endpoint, UserAgent: "test/1.0", TimeoutSeconds: 5, Language: "ja"})
+	s, err := c.fetch(context.Background(), "800000000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = saveSnapshot(context.Background(), db, s); err != nil {
+		t.Fatal(err)
 	}
 }
