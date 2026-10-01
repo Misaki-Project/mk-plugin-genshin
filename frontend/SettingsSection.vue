@@ -20,7 +20,7 @@ SPDX-License-Identifier: AGPL-3.0-only
 			<div>確認対象: {{ pending.uid }}</div>
 			<MkInput :modelValue="pending.code" readonly>
 				<template #label>紐づけコード</template>
-				<template #caption>数字6桁と間の記号を省略・変更せず、そのままステータスメッセージに追加してください。</template>
+				<template #caption>コードは合計6文字で、記号を1文字以上含みます。記号も省略・変更せず、そのままステータスメッセージに追加してください。</template>
 			</MkInput>
 			<div>原神のステータスメッセージに上のコードを追加して保存し、一度ゲームからログアウトしてから「認証する」を押してください。</div>
 			<div>反映には時間がかかる場合があります。コードは発行から10分間有効です。</div>

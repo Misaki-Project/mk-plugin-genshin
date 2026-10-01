@@ -212,17 +212,19 @@ func TestLinkCodeFormatAndRandomness(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(code) != 11 {
+		if len(code) != 6 {
 			t.Fatal("invalid code length")
 		}
-		for i, ch := range code {
-			if i%2 == 0 {
-				if ch < '0' || ch > '9' {
-					t.Fatal("expected decimal digit")
-				}
-			} else if !strings.ContainsRune(linkCodeSymbols, ch) {
-				t.Fatal("expected allowed symbol")
+		hasSymbol := false
+		for _, ch := range code {
+			if strings.ContainsRune(linkCodeSymbols, ch) {
+				hasSymbol = true
+			} else if ch < '0' || ch > '9' {
+				t.Fatal("expected decimal digit or allowed symbol")
 			}
+		}
+		if !hasSymbol {
+			t.Fatal("digit-only code accepted")
 		}
 		seen[code] = true
 	}
@@ -232,7 +234,7 @@ func TestLinkCodeFormatAndRandomness(t *testing.T) {
 }
 
 func TestSignatureContainsEntireIssuedCode(t *testing.T) {
-	const code = "1!2@3#4%5&6"
+	const code = "12!345"
 	for _, tc := range []struct {
 		signature, code string
 		want            bool
@@ -242,9 +244,9 @@ func TestSignatureContainsEntireIssuedCode(t *testing.T) {
 		{"x" + code + "y", code, true},
 		{code[:len(code)-1], code, false},
 		{"123456", code, false},
-		{"1!2@3#4%5&7", code, false},
-		{"1!2@3#4%5?6", code, false},
-		{"1!2@3# 4%5&6", code, false},
+		{"12!346", code, false},
+		{"12?345", code, false},
+		{"12! 345", code, false},
 		{"", code, false},
 		{"anything", "", false},
 	} {

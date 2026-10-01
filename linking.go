@@ -53,19 +53,23 @@ type challenge struct {
 }
 
 func newLinkCode() (string, error) {
-	var code [11]byte
-	for i := range code {
-		alphabet := "0123456789"
-		if i%2 == 1 {
-			alphabet = linkCodeSymbols
+	const alphabet = "0123456789" + linkCodeSymbols
+	for {
+		var code [6]byte
+		hasSymbol := false
+		for i := range code {
+			n, err := rand.Int(rand.Reader, big.NewInt(int64(len(alphabet))))
+			if err != nil {
+				return "", err
+			}
+			code[i] = alphabet[n.Int64()]
+			hasSymbol = hasSymbol || n.Int64() >= 10
 		}
-		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(alphabet))))
-		if err != nil {
-			return "", err
+		// Reject digit-only samples so every valid six-character code is uniform.
+		if hasSymbol {
+			return string(code[:]), nil
 		}
-		code[i] = alphabet[n.Int64()]
 	}
-	return string(code[:]), nil
 }
 
 // The complete issued code must occur verbatim; surrounding text is allowed.
