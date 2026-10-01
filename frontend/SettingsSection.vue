@@ -20,9 +20,11 @@ SPDX-License-Identifier: AGPL-3.0-only
 			<div>確認対象: {{ pending.uid }}</div>
 			<MkInput :modelValue="pending.code" readonly>
 				<template #label>紐づけコード</template>
+				<template #caption>数字6桁と間の記号を省略・変更せず、そのままステータスメッセージに追加してください。</template>
 			</MkInput>
 			<div>原神のステータスメッセージに上のコードを追加して保存し、一度ゲームからログアウトしてから「認証する」を押してください。</div>
 			<div>反映には時間がかかる場合があります。コードは発行から10分間有効です。</div>
+			<div>認証確認の送信後は、最低60秒待ってから再確認してください。Enkaの反映待ちが長い場合は、その期限まで待機します。</div>
 			<div role="timer">残り {{ remaining }} 秒</div>
 			<div v-if="waitSeconds > 0">反映待ちです。{{ waitSeconds }} 秒後に再確認できます。</div>
 			<MkButton primary :disabled="busy || remaining === 0 || waitSeconds > 0 || pending.attempts >= 10" @click="verify">認証する</MkButton>
@@ -39,6 +41,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { MkInput, MkButton, MkFolder } from '@/plugin-api.js';
 import { api } from './api.js';
 import type { LinkChallenge, MeResponse, VerifyResponse } from './api.js';
+import { verificationWaitMs, verificationWaitSeconds } from './verification-wait.js';
 
 const uids = ref<string[]>([]);
 const limit = ref(1);
@@ -47,8 +50,9 @@ const pending = ref<LinkChallenge | null>(null);
 const busy = ref(false);
 const message = ref('');
 const now = ref(Date.now());
+const verifyNotBefore = ref(0);
 const remaining = computed(() => Math.max(0, Math.ceil(((pending.value ? Date.parse(pending.value.expiresAt) : 0) - now.value) / 1000)));
-const waitSeconds = computed(() => Math.max(0, Math.ceil(((pending.value ? Date.parse(pending.value.nextCheckAt) : 0) - now.value) / 1000)));
+const waitSeconds = computed(() => verificationWaitSeconds(verifyNotBefore.value, pending.value ? Date.parse(pending.value.nextCheckAt) : 0, now.value));
 let timer: number | undefined;
 
 async function reload(): Promise<void> {
@@ -75,8 +79,10 @@ async function begin(): Promise<void> {
 }
 
 async function verify(): Promise<void> {
-	if (pending.value == null) return;
+	if (pending.value == null || busy.value || waitSeconds.value > 0) return;
 	const code = pending.value.code;
+	now.value = Date.now();
+	verifyNotBefore.value = now.value + verificationWaitMs;
 	await run(async () => {
 		const res = await api<VerifyResponse>('me/verify', { code });
 		await reload();

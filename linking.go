@@ -4,10 +4,10 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"math"
+	"math/big"
 	"strings"
 	"time"
 
@@ -16,6 +16,7 @@ import (
 
 const challengeLifetime = 10 * time.Minute
 const maxVerificationAttempts = 10
+const linkCodeSymbols = "-+!?@#%&=_"
 
 // Legacy registrations are preserved, but are not ownership proof. They must
 // not reserve a UID or appear publicly until the user completes verification.
@@ -52,23 +53,24 @@ type challenge struct {
 }
 
 func newLinkCode() (string, error) {
-	var raw [16]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return "", err
+	var code [11]byte
+	for i := range code {
+		alphabet := "0123456789"
+		if i%2 == 1 {
+			alphabet = linkCodeSymbols
+		}
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(alphabet))))
+		if err != nil {
+			return "", err
+		}
+		code[i] = alphabet[n.Int64()]
 	}
-	return "MK-" + hex.EncodeToString(raw[:]), nil
+	return string(code[:]), nil
 }
 
-// Exact token matching prevents a partial/prefix match from proving ownership.
+// The complete issued code must occur verbatim; surrounding text is allowed.
 func signatureHasCode(signature, code string) bool {
-	for _, token := range strings.FieldsFunc(signature, func(r rune) bool {
-		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-')
-	}) {
-		if token == code {
-			return true
-		}
-	}
-	return false
+	return code != "" && strings.Contains(signature, code)
 }
 
 func linkLimit(c context.Context, api plugin.API, userID string) (int, error) {
@@ -212,7 +214,7 @@ func registerLinkRoutes(ctx plugin.Context, r plugin.Router, db *sql.DB, client 
 		var pending challenge
 		err = tx.QueryRowContext(req.Context(), `INSERT INTO link_challenges(user_id,uid,code,expires_at)
 		 VALUES($1,$2,$3,clock_timestamp()+interval '10 minutes') ON CONFLICT(user_id) DO UPDATE SET
-		 uid=EXCLUDED.uid,code=EXCLUDED.code,expires_at=EXCLUDED.expires_at,issued_at=clock_timestamp(),next_check_at=clock_timestamp(),attempts=0
+		 uid=EXCLUDED.uid,code=EXCLUDED.code,expires_at=EXCLUDED.expires_at,issued_at=clock_timestamp(),next_check_at=GREATEST(link_challenges.next_check_at,clock_timestamp()),attempts=0
 		 RETURNING uid,code,expires_at,next_check_at,attempts`, me, body.UID, code).
 			Scan(&pending.UID, &pending.Code, &pending.ExpiresAt, &pending.NextCheckAt, &pending.Attempts)
 		if err != nil {
@@ -318,13 +320,13 @@ func verifyLink(req plugin.Request, ctx plugin.Context, db *sql.DB, client *enka
 	}
 	if err != nil {
 		// Failed upstream calls also consume a rate-limited attempt. No UID is linked.
-		if _, e := tx.ExecContext(c, `UPDATE link_challenges SET attempts=attempts+1,next_check_at=clock_timestamp()+interval '30 seconds' WHERE user_id=$1`, me); e != nil {
+		if _, e := tx.ExecContext(c, `UPDATE link_challenges SET attempts=attempts+1,next_check_at=clock_timestamp()+interval '60 seconds' WHERE user_id=$1`, me); e != nil {
 			return nil, e
 		}
 		if e := tx.Commit(); e != nil {
 			return nil, e
 		}
-		return nil, plugin.Errorf(503, "ゲーム情報を取得できませんでした。30秒待って再確認してください")
+		return nil, plugin.Errorf(503, "ゲーム情報を取得できませんでした。60秒待って再確認してください")
 	}
 	if err = tx.QueryRowContext(c, `SELECT clock_timestamp()`).Scan(&now); err != nil {
 		return nil, err
@@ -333,7 +335,7 @@ func verifyLink(req plugin.Request, ctx plugin.Context, db *sql.DB, client *enka
 		return nil, plugin.Errorf(410, "コードの有効期限が切れました。再発行してください")
 	}
 	if !signatureHasCode(signature, pending.Code) {
-		err = tx.QueryRowContext(c, `UPDATE link_challenges SET attempts=attempts+1,next_check_at=GREATEST($2,clock_timestamp()+interval '30 seconds') WHERE user_id=$1 RETURNING next_check_at`, me, cacheUntil).Scan(&cacheUntil)
+		err = tx.QueryRowContext(c, `UPDATE link_challenges SET attempts=attempts+1,next_check_at=GREATEST($2,clock_timestamp()+interval '60 seconds') WHERE user_id=$1 RETURNING next_check_at`, me, cacheUntil).Scan(&cacheUntil)
 		if err != nil {
 			return nil, err
 		}

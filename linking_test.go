@@ -28,11 +28,13 @@ func (a *linkingAPI) Call(_ context.Context, endpoint string, _ any) (json.RawMe
 }
 
 type verificationFixture struct {
-	db    *sql.DB
-	h     plugintest.Handlers
-	api   *linkingAPI
-	calls atomic.Int64
-	match atomic.Bool
+	db     *sql.DB
+	h      plugintest.Handlers
+	api    *linkingAPI
+	calls  atomic.Int64
+	match  atomic.Bool
+	ttl    atomic.Int64
+	status atomic.Int64
 }
 
 func newVerificationFixture(t *testing.T, limit int64) *verificationFixture {
@@ -40,8 +42,14 @@ func newVerificationFixture(t *testing.T, limit int64) *verificationFixture {
 	f := &verificationFixture{db: testDB(t), api: &linkingAPI{}}
 	f.api.limit.Store(limit)
 	f.match.Store(true)
+	f.ttl.Store(300)
+	f.status.Store(http.StatusOK)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.calls.Add(1)
+		if status := int(f.status.Load()); status != http.StatusOK {
+			http.Error(w, "fixture unavailable", status)
+			return
+		}
 		var signature string
 		if f.match.Load() {
 			if err := f.db.QueryRow(`SELECT string_agg(code,' ') FROM link_challenges WHERE uid=$1`, strings.TrimPrefix(r.URL.Path, "/api/uid/")).Scan(&signature); err != nil {
@@ -49,7 +57,7 @@ func newVerificationFixture(t *testing.T, limit int64) *verificationFixture {
 				return
 			}
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"playerInfo": map[string]any{"nickname": "Traveler", "signature": signature}, "ttl": 300})
+		_ = json.NewEncoder(w).Encode(map[string]any{"playerInfo": map[string]any{"nickname": "Traveler", "signature": "前文" + signature + "後文"}, "ttl": f.ttl.Load()})
 	}))
 	t.Cleanup(srv.Close)
 	f.h = plugintest.New(t).WithName("genshin").WithDB(f.db).WithAPI(f.api).
@@ -197,20 +205,142 @@ func TestVerificationUIDExclusivityAndUnlink(t *testing.T) {
 	}
 }
 
-func TestLinkCodeEntropyAndBoundaries(t *testing.T) {
+func TestLinkCodeFormatAndRandomness(t *testing.T) {
 	seen := map[string]bool{}
 	for range 100 {
 		code, err := newLinkCode()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(code) != 35 || seen[code] {
-			t.Fatal("invalid/reused code")
+		if len(code) != 11 {
+			t.Fatal("invalid code length")
+		}
+		for i, ch := range code {
+			if i%2 == 0 {
+				if ch < '0' || ch > '9' {
+					t.Fatal("expected decimal digit")
+				}
+			} else if !strings.ContainsRune(linkCodeSymbols, ch) {
+				t.Fatal("expected allowed symbol")
+			}
 		}
 		seen[code] = true
-		if !signatureHasCode("hello "+code+"!", code) || signatureHasCode(code+"x", code) || signatureHasCode(strings.ToUpper(code), code) {
-			t.Fatal("unsafe token matching")
+	}
+	if len(seen) < 2 {
+		t.Fatal("all random codes were identical")
+	}
+}
+
+func TestSignatureContainsEntireIssuedCode(t *testing.T) {
+	const code = "1!2@3#4%5&6"
+	for _, tc := range []struct {
+		signature, code string
+		want            bool
+	}{
+		{code, code, true},
+		{"前文" + code + "後文", code, true},
+		{"x" + code + "y", code, true},
+		{code[:len(code)-1], code, false},
+		{"123456", code, false},
+		{"1!2@3#4%5&7", code, false},
+		{"1!2@3#4%5?6", code, false},
+		{"1!2@3# 4%5&6", code, false},
+		{"", code, false},
+		{"anything", "", false},
+	} {
+		if got := signatureHasCode(tc.signature, tc.code); got != tc.want {
+			t.Fatalf("signatureHasCode(%q,%q)=%v", tc.signature, tc.code, got)
 		}
+	}
+}
+
+func TestVerificationWaitsAtLeast60SecondsAfterMismatch(t *testing.T) {
+	f := newVerificationFixture(t, 1)
+	f.ttl.Store(1)
+	f.match.Store(false)
+	p := f.begin(t, "u1", "800000001")
+	sent := time.Now()
+	res, err := f.verify(t, "u1", p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := res.(map[string]any)["nextCheckAt"].(time.Time)
+	if next.Before(sent.Add(60 * time.Second)) {
+		t.Fatalf("retry permitted too early: %v", next.Sub(sent))
+	}
+	f.match.Store(true)
+	if _, err := f.verify(t, "u1", p); err != nil {
+		t.Fatal(err)
+	}
+	if f.calls.Load() != 1 || f.count(t) != 0 {
+		t.Fatal("verification bypassed cooldown")
+	}
+	// Simulate expired Enka cache while still inside the last second of cooldown.
+	if _, err := f.db.Exec(`UPDATE snapshots SET expires_at=clock_timestamp()-interval '1 second'; UPDATE verification_cache SET expires_at=clock_timestamp()-interval '1 second'; UPDATE link_challenges SET next_check_at=clock_timestamp()+interval '1 second'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.verify(t, "u1", p); err != nil {
+		t.Fatal(err)
+	}
+	if f.calls.Load() != 1 {
+		t.Fatal("expired cache bypassed cooldown")
+	}
+	if _, err := f.db.Exec(`UPDATE link_challenges SET next_check_at=clock_timestamp()-interval '1 second'`); err != nil {
+		t.Fatal(err)
+	}
+	res, err = f.verify(t, "u1", p)
+	if err != nil || res.(map[string]any)["verified"] != true || f.calls.Load() != 2 {
+		t.Fatalf("verification after cooldown: %v %v", res, err)
+	}
+}
+
+func TestVerificationWaitsAtLeast60SecondsAfterUpstreamFailure(t *testing.T) {
+	f := newVerificationFixture(t, 1)
+	f.status.Store(http.StatusServiceUnavailable)
+	p := f.begin(t, "u1", "800000001")
+	sent := time.Now()
+	if _, err := f.verify(t, "u1", p); err == nil {
+		t.Fatal("upstream failure accepted")
+	}
+	var next time.Time
+	var attempts int
+	if err := f.db.QueryRow(`SELECT next_check_at,attempts FROM link_challenges WHERE user_id='u1'`).Scan(&next, &attempts); err != nil {
+		t.Fatal(err)
+	}
+	if next.Before(sent.Add(60*time.Second)) || attempts != 1 {
+		t.Fatalf("invalid failure cooldown: %v %d", next.Sub(sent), attempts)
+	}
+	if _, err := f.verify(t, "u1", p); err != nil {
+		t.Fatal(err)
+	}
+	if f.calls.Load() != 1 {
+		t.Fatal("upstream retried during cooldown")
+	}
+}
+
+func TestVerificationReissueDoesNotShortenCooldown(t *testing.T) {
+	f := newVerificationFixture(t, 2)
+	f.match.Store(false)
+	f.ttl.Store(1)
+	p := f.begin(t, "u1", "800000001")
+	res, err := f.verify(t, "u1", p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := res.(map[string]any)["nextCheckAt"].(time.Time)
+	if _, err := f.db.Exec(`UPDATE link_challenges SET issued_at=clock_timestamp()-interval '31 seconds'`); err != nil {
+		t.Fatal(err)
+	}
+	q := f.begin(t, "u1", "800000002")
+	if q.NextCheckAt.Before(next) {
+		t.Fatal("reissue shortened verification cooldown")
+	}
+	f.match.Store(true)
+	if _, err := f.verify(t, "u1", q); err != nil {
+		t.Fatal(err)
+	}
+	if f.calls.Load() != 1 || f.count(t) != 0 {
+		t.Fatal("reissue bypassed verification cooldown")
 	}
 }
 
