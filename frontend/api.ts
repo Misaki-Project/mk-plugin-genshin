@@ -21,9 +21,12 @@ export function api<T>(path: string, params: Record<string, unknown> = {}): Prom
 	return call<T>(`plugin/genshin/${path}`, params);
 }
 
-export type MeResponse = { uid: string | null };
+export type LinkChallenge = { uid: string; code: string; expiresAt: string; nextCheckAt: string; attempts: number };
+export type MeResponse = { uids: string[]; limit: number; pending: LinkChallenge | null };
+export type VerifyResponse = { verified: boolean; uid?: string; nextCheckAt?: string; expiresAt?: string };
 
 export type ShowcaseCharacter = {
+	avatarId: number;
 	level: number;
 	element: string;
 	icon: string;

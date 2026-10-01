@@ -149,30 +149,28 @@ func TestRemoteAcct_LocalUser(t *testing.T) {
 //
 // **`h.Peer(Plugin)` を通す (mk-go #2819)。** 登録は Definition.Peer にあるので、
 // Routes だけではハンドラが 1 つも入らない。
-func peerHarness(t *testing.T, api plugin.API) (*plugintest.Harness, plugintest.Handlers) {
+func peerHarness(t *testing.T, api plugin.API, seed ...bool) (*plugintest.Harness, plugintest.Handlers) {
 	t.Helper()
 	srv := fakeEnka(t, http.StatusOK,
 		`{"playerInfo":{"nickname":"Traveler","level":60,"worldLevel":8,"signature":"hi"},"ttl":300}`)
+	db := testDB(t)
 	h := plugintest.New(t).
 		WithName("genshin").
-		WithDB(testDB(t)).
+		WithDB(db).
 		WithAPI(api).
 		WithPeers("other.example").
 		WithConfig(map[string]any{"endpoint": srv.URL, "userAgent": "test/1.0", "timeoutSeconds": 5})
 	h.Peer(Plugin)
+	if len(seed) > 0 && seed[0] {
+		seedVerifiedSnapshot(t, db, srv.URL)
+	}
 	return h, h.Routes(Plugin)
 }
 
 // 相手から聞かれたら、自分のところの利用者の分だけ答える。
 func TestPeer_AnswersForLocalUser(t *testing.T) {
 	api := &fakeAPI{resp: json.RawMessage(`{"id":"u1","host":null}`)}
-	h, routes := peerHarness(t, api)
-
-	if _, err := routes.Call(t, "POST /me/set", plugintest.Request{
-		UserID: "u1", Body: `{"uid":"800000000"}`,
-	}); err != nil {
-		t.Fatal(err)
-	}
+	h, _ := peerHarness(t, api, true)
 
 	res, err := h.DeliverPeer("other.example", peerRequest{Username: "alice"})
 	if err != nil {

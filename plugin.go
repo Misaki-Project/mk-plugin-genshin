@@ -23,9 +23,9 @@ import (
 // Plugin is the entry point referenced by the generated registration code.
 var Plugin = plugin.Definition{
 	Name:       "genshin",
-	Version:    "0.1.0",
+	Version:    "0.2.0",
 	APIVersion: plugin.APIVersion,
-	Migrations: append(migrations, peerCacheMigration...),
+	Migrations: append(append(migrations, peerCacheMigration...), linkingMigration),
 	Routes:     routes,
 	Jobs:       jobs,
 	// 同じプラグインを入れた mk-go 同士で、リモート利用者の戦績を取り寄せる。
@@ -155,69 +155,52 @@ func routes(ctx plugin.Context, r plugin.Router) error {
 	// frontend から呼ぶものは POST にする。misskeyApi (= host.api) が POST
 	// 固定で、Misskey 本体の API も POST 基本なのでそれに倣う。
 
-	r.POST("/me", func(req plugin.Request) (any, error) {
-		me := req.UserID()
-		if me == "" {
-			return nil, plugin.Errorf(http.StatusUnauthorized, "ログインが必要です")
+	registerLinkRoutes(ctx, r, db, client)
+	r.POST("/profiles", func(req plugin.Request) (any, error) {
+		var body struct {
+			UserID string `json:"userId"`
 		}
-		var uid string
-		var updated *time.Time
-		err := db.QueryRowContext(req.Context(),
-			`SELECT uid, updated_at FROM accounts WHERE user_id = $1`, me).Scan(&uid, &updated)
-		if errors.Is(err, sql.ErrNoRows) {
-			return map[string]any{"uid": nil}, nil
+		if req.Bind(&body) != nil || body.UserID == "" {
+			return nil, plugin.Errorf(400, "userIdが必要です")
 		}
+		rows, err := db.QueryContext(req.Context(), `SELECT uid FROM accounts WHERE user_id=$1 ORDER BY updated_at, uid`, body.UserID)
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"uid": uid, "updatedAt": updated}, nil
-	})
-
-	r.POST("/me/set", func(req plugin.Request) (any, error) {
-		me := req.UserID()
-		if me == "" {
-			return nil, plugin.Errorf(http.StatusUnauthorized, "ログインが必要です")
-		}
-		var body struct {
-			UID string `json:"uid"`
-		}
-		if err := req.Bind(&body); err != nil {
-			return nil, plugin.Errorf(http.StatusBadRequest, "リクエストを読めません")
-		}
-
-		// 空文字は登録解除として扱う。UI から消したときに消せないと不便。
-		if body.UID == "" {
-			if _, err := db.ExecContext(req.Context(), `DELETE FROM accounts WHERE user_id = $1`, me); err != nil {
+		uids := []string{}
+		for rows.Next() {
+			var uid string
+			if err := rows.Scan(&uid); err != nil {
+				_ = rows.Close()
 				return nil, err
 			}
-			return map[string]any{"uid": nil}, nil
+			uids = append(uids, uid)
 		}
-		if !uidPattern.MatchString(body.UID) {
-			return nil, plugin.Errorf(http.StatusBadRequest, "UID の形式が正しくありません")
-		}
-
-		// **登録時に 1 度だけ取得して存在を確かめる。** 存在しない UID を黙って
-		// 保存すると、プロフィールに何も出ない理由が利用者に分からない。
-		snap, err := client.fetch(req.Context(), body.UID)
+		err = rows.Err()
+		_ = rows.Close()
 		if err != nil {
-			var ue *upstreamError
-			if errors.As(err, &ue) && ue.userFacing != "" {
-				return nil, plugin.Errorf(ue.status, "%s", ue.userFacing)
+			return nil, err
+		}
+		profiles := []map[string]any{}
+		for _, uid := range uids {
+			p, err := buildProfile(req.Context(), db, client, body.UserID, uid)
+			if err != nil {
+				return nil, err
 			}
-			// 上流の一時的な不調で登録を拒むと、直るまで設定できない。
-			// 保存だけして、表示は次の更新に任せる。
-			ctx.Logger().Warn("登録時の取得に失敗しました (保存は行います)", "err", err)
-		} else if err := saveSnapshot(req.Context(), db, snap); err != nil {
-			return nil, err
+			if p != nil {
+				profiles = append(profiles, p)
+			}
 		}
-
-		if _, err := db.ExecContext(req.Context(), `
-			INSERT INTO accounts (user_id, uid, updated_at) VALUES ($1, $2, now())
-			ON CONFLICT (user_id) DO UPDATE SET uid = EXCLUDED.uid, updated_at = now()
-		`, me, body.UID); err != nil {
-			return nil, err
+		if len(uids) == 0 {
+			p, err := remoteLookup(req.Context(), ctx, db, req.UserID(), body.UserID)
+			if err != nil {
+				return nil, err
+			}
+			if payload, ok := p.(map[string]any); ok && payload["linked"] == true {
+				profiles = append(profiles, payload)
+			}
 		}
-		return map[string]any{"uid": body.UID}, nil
+		return map[string]any{"profiles": profiles}, nil
 	})
 
 	r.POST("/profile", func(req plugin.Request) (any, error) {
@@ -312,20 +295,47 @@ func refreshExpired(c context.Context, ctx plugin.Context, db *sql.DB, client *e
 	_ = rows.Close()
 
 	for _, uid := range uids {
-		snap, err := client.fetch(c, uid)
-		if err != nil {
-			// 1 件の失敗で全体を止めない。次回の実行で再試行される。
-			ctx.Logger().Warn("取得に失敗しました", "uid", uid, "err", err)
-			continue
-		}
-		if err := saveSnapshot(c, db, snap); err != nil {
-			ctx.Logger().Warn("保存に失敗しました", "uid", uid, "err", err)
+		if err := refreshUID(c, db, client, uid); err != nil {
+			// 1件の失敗で全体を止めない。次回の実行で再試行する。
+			ctx.Logger().Warn("更新に失敗しました", "uid", uid, "err", err)
 		}
 	}
 	return nil
 }
 
-func saveSnapshot(c context.Context, db *sql.DB, s *snapshot) error {
+// The job and ownership verification share a UID lock and ttl. A verifier
+// must not be followed by another fetch from a job selected before it finished.
+func refreshUID(c context.Context, db *sql.DB, client *enkaClient, uid string) error {
+	tx, err := db.BeginTx(c, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(c, `SELECT pg_advisory_xact_lock(hashtextextended($1, 48128))`, uid); err != nil {
+		return err
+	}
+	var fresh bool
+	if err = tx.QueryRowContext(c, `SELECT EXISTS(SELECT 1 FROM snapshots WHERE uid=$1 AND expires_at>clock_timestamp())`, uid).Scan(&fresh); err != nil {
+		return err
+	}
+	if fresh {
+		return nil
+	}
+	snap, err := client.fetch(c, uid)
+	if err != nil {
+		return err
+	}
+	if err = saveSnapshot(c, tx, snap); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+type snapshotWriter interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func saveSnapshot(c context.Context, db snapshotWriter, s *snapshot) error {
 	showcase, err := json.Marshal(s.showcase)
 	if err != nil {
 		return err

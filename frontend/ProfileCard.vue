@@ -48,6 +48,8 @@ SPDX-License-Identifier: AGPL-3.0-only
 					type="button"
 					class="_button"
 					:class="[$style.chara, { [$style.charaActive]: selected === i }]"
+					:aria-label="data.characters.find(ch => ch.avatarId === c.avatarId)?.name || `キャラクター #${c.avatarId}`"
+					:aria-pressed="selected === i"
 					@click="selected = i"
 				>
 					<img v-if="c.icon" :class="$style.charaIcon" :src="c.icon" alt=""/>
@@ -120,11 +122,12 @@ SPDX-License-Identifier: AGPL-3.0-only
 
 <script lang="ts" setup>
 import { ref, computed, onMounted } from 'vue';
-import { type SlotContext } from '@/plugin-api.js';
+import type { SlotContext } from '@/plugin-api.js';
 import { api } from './api.js';
+import { selectedBuild } from './character-selection.js';
 import type { ProfileResponse, LinkedProfile, Stat } from './api.js';
 
-const props = defineProps<{ ctx: SlotContext }>();
+const props = defineProps<{ ctx: SlotContext; profile?: LinkedProfile }>();
 
 const data = ref<LinkedProfile | null>(null);
 const open = ref(false);
@@ -135,12 +138,9 @@ const selected = ref<number | null>(null);
 const showcase = computed(() => data.value?.showcase ?? []);
 
 const build = computed(() => {
-	if (data.value == null || selected.value == null) return null;
-	const icon = showcase.value[selected.value];
-	if (icon == null) return null;
-	// showcase と characters は同じ並びで返るが、詳細が非公開だと
-	// characters 側だけ短くなる。位置ではなく件数で照合する。
-	return data.value.characters[selected.value] ?? null;
+	if (data.value == null) return null;
+	// 詳細は順序が異なったり一部が非公開だったりするため、ID で照合する。
+	return selectedBuild(showcase.value, data.value.characters, selected.value);
 });
 
 function toggle(): void {
@@ -158,6 +158,7 @@ function fmt(st: Stat): string {
 }
 
 onMounted(async () => {
+	if (props.profile != null) { data.value = props.profile; return; }
 	const user = props.ctx.user;
 	if (user == null) return;
 	// リモート利用者も引く。相手が同じプラグインを入れた mk-go なら、
