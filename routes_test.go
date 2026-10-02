@@ -194,11 +194,11 @@ func TestJobs_RefreshKeepsStaleOnFailure(t *testing.T) {
 	seedVerifiedSnapshot(t, db, ok.URL)
 
 	// 期限切れにしてから、上流が落ちている状態で更新を走らせる。
-	if _, err := db.Exec(`UPDATE snapshots SET expires_at = now() - interval '1 hour'`); err != nil {
+	if _, err := db.Exec(`UPDATE snapshots SET expires_at = now() - interval '1 hour', fetched_at = now() - interval '1 hour'`); err != nil {
 		t.Fatal(err)
 	}
 	down := fakeEnka(t, http.StatusFailedDependency, `{"message":"down"}`)
-	jobs := plugintest.New(t).WithName("genshin").WithDB(db).
+	jobs := plugintest.New(t).WithName("genshin").WithDB(db).WithAPI(defaultLinkingAPI()).
 		WithConfig(map[string]any{"endpoint": down.URL, "timeoutSeconds": 5}).Jobs(Plugin)
 
 	if err := jobs.Run(t, "refresh", ""); err != nil {
