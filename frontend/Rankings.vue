@@ -44,6 +44,7 @@ SPDX-License-Identifier: AGPL-3.0-only
 				</div>
 			</section>
 		</div>
+		<div :class="$style.credit"><a href="https://enka.network/" target="_blank" rel="noopener noreferrer">Powered by Enka.Network</a></div>
 	</div>
 </component>
 </template>
@@ -131,6 +132,7 @@ if (!props.embedded) {
 .detail { margin-top: 4px; }
 .score { text-align: right; font-variant-numeric: tabular-nums; }
 .pagination { margin-top: 16px; }
+.credit { margin-top: 12px; text-align: right; font-size: 75%; color: var(--MI_THEME-fgTransparentWeak); }
 @media (max-width: 480px) {
 	.record { grid-template-columns: 24px 32px minmax(0, 1fr); }
 	.avatar { width: 32px; height: 32px; }

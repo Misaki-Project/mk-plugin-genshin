@@ -49,6 +49,7 @@ describe('原神ランキングの標準UI', () => {
 		mocks.api.mockResolvedValue({ metric: 'spiral', scheduleId: 0, hasMore: false, entries: [1, 2, 3, 4].map(rank => ({ rank, userId: 'u1', accountId: `a${rank}`, nickname: `Traveler ${rank}`, value: 36, fetchedAt: '2026-10-01T00:00:00Z' })) });
 		render(Rankings);
 		await screen.findByText('Traveler 1');
+		expect(screen.getByRole('link', { name: 'Powered by Enka.Network' }).getAttribute('rel')).toBe('noopener noreferrer');
 		['🥇', '🥈', '🥉', '4'].forEach((label, index) => {
 			expect(screen.getByLabelText(`${index + 1}位`).textContent).toBe(label);
 			expect(screen.getByLabelText(`${index + 1}位`).className.includes('medal')).toBe(index < 3);

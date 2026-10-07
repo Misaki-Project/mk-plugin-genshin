@@ -25,6 +25,8 @@ it('閉じたプロフィールにはリンク・順位を表示せず、開い�
 	const toggle = await screen.findByRole('button', { name: /原神/ });
 	expect(screen.queryByRole('link', { name: 'サーバー内の原神ランキング' })).toBeNull();
 	await fireEvent.click(toggle);
+	expect(screen.getByRole('link', { name: 'Powered by Enka.Network' }).getAttribute('href')).toBe('https://enka.network/');
+	expect(screen.queryByText(/^UID /)).toBeNull();
 	await screen.findByText('実績の数 52位');
 	expect(screen.getByRole('link', { name: 'サーバー内の原神ランキング' })).toBeTruthy();
 	expect(screen.queryByText(/深境螺旋の星の数 .*位/)).toBeNull();

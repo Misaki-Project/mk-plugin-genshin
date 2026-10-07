@@ -119,7 +119,10 @@ SPDX-License-Identifier: AGPL-3.0-only
 				</div>
 			</div>
 
-			<div v-if="data.uid" :class="$style.footer">UID {{ data.uid }}</div>
+			<div :class="$style.footer">
+				<span v-if="data.uid">UID {{ data.uid }}</span>
+				<a :class="$style.credit" href="https://enka.network/" target="_blank" rel="noopener noreferrer">Powered by Enka.Network</a>
+			</div>
 		</div>
 	</div>
 </div>
@@ -486,8 +489,13 @@ onMounted(async () => {
 }
 
 .footer {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex-wrap: wrap;
 	margin-top: 10px;
 	font-size: 0.75em;
 	opacity: 0.55;
 }
+.credit { margin-left: auto; }
 </style>
