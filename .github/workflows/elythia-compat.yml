@@ -1,0 +1,51 @@
+name: Elythia 2.0 compatibility
+
+on:
+  pull_request:
+  push:
+    branches: [feat/elythia-2-0-compat-20261007]
+
+permissions:
+  contents: read
+
+jobs:
+  plugin-tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: mk
+          POSTGRES_PASSWORD: mk
+          POSTGRES_DB: misskey_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U mk -d misskey_test"
+          --health-interval 10s --health-timeout 5s --health-retries 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: Elythia-Network/elythia
+          ref: 3a01a6d62948725e1bc888012be9aeec6f690b86
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: plugins/genshin
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+      - name: Check formatting
+        working-directory: plugins/genshin
+        run: |
+          set -euo pipefail
+          diff=$(gofmt -s -l .)
+          if [ -n "$diff" ]; then printf '%s\n' "$diff"; exit 1; fi
+      - name: Vet, race tests and build against release 2.0.0
+        working-directory: plugins/genshin
+        env:
+          GOWORK: 'off'
+          GOFLAGS: '-mod=readonly'
+        run: |
+          set -euo pipefail
+          go vet ./...
+          go test ./... -v -race -count=1 -shuffle=3
+          go build ./...
