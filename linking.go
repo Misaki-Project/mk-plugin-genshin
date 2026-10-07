@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/shiroha-a/mk/plugin"
+	"github.com/elythia-network/elythia/plugin"
 )
 
 const challengeLifetime = 10 * time.Minute
