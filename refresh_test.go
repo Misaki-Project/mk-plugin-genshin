@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shiroha-a/mk/plugin"
-	"github.com/shiroha-a/mk/plugin/plugintest"
+	"github.com/elythia-network/elythia/plugin"
+	"github.com/elythia-network/elythia/plugin/plugintest"
 )
 
 type refreshAPI struct {

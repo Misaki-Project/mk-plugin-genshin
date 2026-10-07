@@ -3,7 +3,7 @@ package genshin
 import (
 	"testing"
 
-	"github.com/shiroha-a/mk/plugin/plugintest"
+	"github.com/elythia-network/elythia/plugin/plugintest"
 )
 
 func TestRankingCandidateSnapshotSurvivesConcurrentValueChange(t *testing.T) {

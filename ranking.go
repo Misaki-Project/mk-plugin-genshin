@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/shiroha-a/mk/plugin"
+	"github.com/elythia-network/elythia/plugin"
 )
 
 const maxRankingCandidates = 10000
