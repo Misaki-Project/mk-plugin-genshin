@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"errors"
 
-	"github.com/shiroha-a/mk/plugin"
+	"github.com/elythia-network/elythia/plugin"
 )
 
 var privacyMigration = plugin.Migration{Version: 9, SQL: `

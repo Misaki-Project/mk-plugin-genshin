@@ -16,8 +16,8 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/shiroha-a/mk/plugin"
-	"github.com/shiroha-a/mk/plugin/peercache"
+	"github.com/elythia-network/elythia/plugin"
+	"github.com/elythia-network/elythia/plugin/peercache"
 )
 
 // Plugin is the entry point referenced by the generated registration code.
@@ -25,7 +25,7 @@ var Plugin = plugin.Definition{
 	Name:       "genshin",
 	Version:    "0.2.0",
 	APIVersion: plugin.APIVersion,
-	Migrations: append(append(migrations, peerCacheMigration...), linkingMigration, privacyMigration),
+	Migrations: append(append(migrations, peerCacheMigration...), linkingMigration, privacyMigration, refreshMigration),
 	Routes:     routes,
 	Jobs:       jobs,
 	// 同じプラグインを入れた mk-go 同士で、リモート利用者の戦績を取り寄せる。
@@ -261,75 +261,8 @@ func jobs(ctx plugin.Context, j plugin.Jobs) error {
 	j.Handle("refresh", func(c context.Context, _ json.RawMessage) error {
 		return refreshExpired(c, ctx, db, client)
 	})
-	j.Schedule("*/10 * * * *", "refresh", nil)
+	j.Schedule("* * * * *", "refresh", nil)
 	return nil
-}
-
-// refreshExpired re-fetches snapshots whose ttl has run out.
-//
-// **上流が落ちていても古いデータは消さない。** 原神のデータが取れないせいで
-// プロフィール表示が空になる方が困る (実際 Enka は upstream 不調で 424 を返す
-// ことがある)。
-func refreshExpired(c context.Context, ctx plugin.Context, db *sql.DB, client *enkaClient) error {
-	rows, err := db.QueryContext(c, `
-		SELECT DISTINCT a.uid FROM accounts a
-		LEFT JOIN snapshots s ON s.uid = a.uid
-		WHERE s.uid IS NULL OR s.expires_at <= now()
-		LIMIT 50
-	`)
-	if err != nil {
-		return err
-	}
-	var uids []string
-	for rows.Next() {
-		var uid string
-		if err := rows.Scan(&uid); err != nil {
-			_ = rows.Close()
-			return err
-		}
-		uids = append(uids, uid)
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return err
-	}
-	_ = rows.Close()
-
-	for _, uid := range uids {
-		if err := refreshUID(c, db, client, uid); err != nil {
-			// 1件の失敗で全体を止めない。次回の実行で再試行する。
-			ctx.Logger().Warn("更新に失敗しました", "uid", uid, "err", err)
-		}
-	}
-	return nil
-}
-
-// The job and ownership verification share a UID lock and ttl. A verifier
-// must not be followed by another fetch from a job selected before it finished.
-func refreshUID(c context.Context, db *sql.DB, client *enkaClient, uid string) error {
-	tx, err := db.BeginTx(c, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if _, err = tx.ExecContext(c, `SELECT pg_advisory_xact_lock(hashtextextended($1, 48128))`, uid); err != nil {
-		return err
-	}
-	var fresh bool
-	if err = tx.QueryRowContext(c, `SELECT EXISTS(SELECT 1 FROM snapshots WHERE uid=$1 AND expires_at>clock_timestamp())`, uid).Scan(&fresh); err != nil {
-		return err
-	}
-	if fresh {
-		return nil
-	}
-	snap, err := client.fetch(c, uid)
-	if err != nil {
-		return err
-	}
-	if err = saveSnapshot(c, tx, snap); err != nil {
-		return err
-	}
-	return tx.Commit()
 }
 
 type snapshotWriter interface {

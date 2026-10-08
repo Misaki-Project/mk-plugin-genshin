@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/shiroha-a/mk/plugin/plugintest"
+	"github.com/elythia-network/elythia/plugin/plugintest"
 )
 
 func TestPeerOmitsPrivateUIDAndSignature(t *testing.T) {
